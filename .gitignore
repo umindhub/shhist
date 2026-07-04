@@ -1,0 +1,7 @@
+# SQLite database (lives inside the repo when cloned to ~/.config/shhist)
+history.db
+history.db-wal
+history.db-shm
+
+# User overrides, sourced after config.zsh
+config.local.zsh
