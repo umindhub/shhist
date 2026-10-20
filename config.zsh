@@ -88,6 +88,15 @@ export SHHIST_ESC_FIX=1
 # (arrows, Alt keys) arrive as a single burst within ~1ms, so even low
 # values are safe locally. Set to '' to leave your own KEYTIMEOUT alone.
 export SHHIST_ESC_TIMEOUT_MS=10
+# Follow `mv` / `git mv` run in this shell: once the command succeeds,
+# frecency rows for the old path (and everything under it) move to the
+# new path, keeping their scores; the cwd column of command history is
+# rewritten too. For renames done elsewhere (Finder): `shhist-mv OLD NEW`.
+export SHHIST_TRACK_MV=1
+# Drop entries whose path no longer exists each time a picker opens
+# (j / v / shf / Tab / Ctrl+G). Missing paths under an unmounted
+# /Volumes/<disk> are kept. On demand: `shhist-prune [dir|file]`.
+export SHHIST_PRUNE_ON_PICK=1
 # Record exit codes of commands (adds one tiny sqlite call per prompt).
 export SHHIST_TRACK_EXIT=1
 # Max rows fed into fzf for Ctrl+R.

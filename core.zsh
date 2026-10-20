@@ -109,6 +109,165 @@ _shhist_frecent() {  # $1 = kind, $2 = half-life, $3 = LIKE pattern or ''
 }
 
 # ---------------------------------------------------------------------------
+# Path maintenance: follow renames, prune stale rows
+# ---------------------------------------------------------------------------
+# Pending (old_a, old_A, new_a) triples captured in preexec, applied in
+# precmd once the command has succeeded.
+typeset -ga _SHHIST_MV_PLAN
+
+# SQL: move every row at or under $1 to the same place under $2. Rows that
+# already exist at the destination are merged (scores add up). Also
+# rewrites the cwd column of command history so ctrl-t keeps working.
+_shhist_rename_sql() {  # $1 = old abs path, $2 = new abs path
+  local o="$(_shhist_q "$1")" n="$(_shhist_q "$2")"
+  local pm="(path = '$o' OR substr(path, 1, length('$o') + 1) = '$o' || '/')"
+  local dm="(dir = '$o' OR substr(dir, 1, length('$o') + 1) = '$o' || '/')"
+  print -r -- "
+    INSERT INTO frecency(kind, path, score, last_ts)
+      SELECT kind, '$n' || substr(path, length('$o') + 1), score, last_ts
+      FROM frecency WHERE $pm
+    ON CONFLICT(kind, path) DO UPDATE SET
+      score   = frecency.score + excluded.score,
+      last_ts = max(frecency.last_ts, excluded.last_ts);
+    DELETE FROM frecency WHERE $pm;
+    UPDATE commands SET dir = '$n' || substr(dir, length('$o') + 1) WHERE $dm;
+  "
+}
+
+# Recognize a simple `mv` / `git mv` line and record what will move where.
+# Lists, pipes and subshells are ignored (the target can't be known
+# reliably). Must run BEFORE the command, while sources still exist and
+# we can still tell whether the destination is an existing directory.
+_shhist_plan_mv() {  # $@ = (z)-split words of the command line
+  _SHHIST_MV_PLAN=()
+  local -a w=("$@")
+  local t
+  for t in "${w[@]}"; do
+    [[ "$t" == ('&&'|'||'|';'|'|'|'&'|'|&'|'('|')'|'{'|'}'|$'\n') ]] && return 0
+  done
+  while [[ "${w[1]:-}" == (sudo|command|nocorrect|noglob) ]]; do shift w; done
+  if [[ "${w[1]:-}" == git && "${w[2]:-}" == mv ]]; then
+    shift 2 w
+  elif [[ "${w[1]:-}" == mv ]]; then
+    shift w
+  else
+    return 0
+  fi
+
+  # Collect operands; unquoted globs are expanded like the shell would.
+  local -a ops ex
+  local a p opts_done=0
+  for a in "${w[@]}"; do
+    if (( ! opts_done )); then
+      [[ "$a" == -- ]] && { opts_done=1; continue }
+      [[ "$a" == (-t|--target-directory*) ]] && return 0
+      [[ "$a" == -* ]] && continue
+    fi
+    p="${(Q)a}"
+    [[ "$p" == "~"* ]] && p="${HOME}${p#\~}"
+    if [[ "$a" == "${(Q)a}" && "$p" == *[\*\?\[]* ]]; then
+      ex=(${~p}(N))
+      ops+=("${ex[@]}")
+    else
+      ops+=("$p")
+    fi
+  done
+  (( ${#ops} >= 2 )) || return 0
+
+  local dst="${ops[-1]}" src target
+  [[ "$dst" != / ]] && dst="${dst%/}"
+  local -a srcs=("${(@)ops[1,-2]}")
+  local dst_dir=0
+  [[ -d "$dst" ]] && dst_dir=1
+  (( ${#srcs} > 1 && ! dst_dir )) && return 0
+
+  for src in "${srcs[@]}"; do
+    [[ "$src" != / ]] && src="${src%/}"
+    [[ -n "$src" && "$src" != / ]] || continue
+    [[ -e "$src" || -L "$src" ]] || continue
+    # Case-only rename on a case-insensitive FS: dst "is" the source dir.
+    if (( dst_dir )) && ! [[ "$src" -ef "$dst" ]]; then
+      target="$dst/${src:t}"
+    else
+      target="$dst"
+    fi
+    _SHHIST_MV_PLAN+=("${src:a}" "${src:A}" "${target:a}")
+  done
+}
+
+# Apply the plan if the command succeeded and each move really happened.
+_shhist_apply_mv() {  # $1 = exit code of the last command
+  if (( $1 != 0 || ${#_SHHIST_MV_PLAN} == 0 )); then
+    _SHHIST_MV_PLAN=()
+    return 0
+  fi
+  local i old_a old_A new_a new_A sql=""
+  for (( i = 1; i + 2 <= ${#_SHHIST_MV_PLAN}; i += 3 )); do
+    old_a="${_SHHIST_MV_PLAN[i]}"
+    old_A="${_SHHIST_MV_PLAN[i+1]}"
+    new_a="${_SHHIST_MV_PLAN[i+2]}"
+    [[ -e "$new_a" || -L "$new_a" ]] || continue
+    # Source still there and not the same file -> nothing moved (git mv -n, mv -n).
+    [[ -e "$old_a" ]] && ! [[ "$old_a" -ef "$new_a" ]] && continue
+    new_A="${new_a:A}"
+    [[ "$old_a" != "$new_a" ]] && sql+="$(_shhist_rename_sql "$old_a" "$new_a")"
+    [[ "$old_A" != "$old_a" && "$old_A" != "$new_A" ]] && sql+="$(_shhist_rename_sql "$old_A" "$new_A")"
+  done
+  _SHHIST_MV_PLAN=()
+  [[ -n "$sql" ]] && _shhist_sql "BEGIN; $sql COMMIT;" >/dev/null
+}
+
+# Manual migration for renames done outside this shell (Finder, IDE, ...).
+shhist-mv() {
+  emulate -L zsh
+  if (( $# != 2 )); then
+    print -u2 "usage: shhist-mv OLD NEW"
+    return 2
+  fi
+  local old="${1%/}" new="${2%/}"
+  old="${old:a}" new="${new:a}"
+  _shhist_sql "BEGIN; $(_shhist_rename_sql "$old" "$new") COMMIT;" >/dev/null \
+    && print -r -- "shhist-mv: $old -> $new"
+}
+
+# A missing path under /Volumes/<disk> whose disk is not mounted right now
+# is offline, not gone -- keep it.
+_shhist_offline() {  # $1 = abs path
+  [[ "$1" == /Volumes/?* ]] || return 1
+  [[ ! -d "/Volumes/${${1#/Volumes/}%%/*}" ]]
+}
+
+# Delete frecency rows whose path no longer exists.
+#   shhist-prune [-q] [dir|file]
+shhist-prune() {
+  emulate -L zsh
+  local quiet=0
+  [[ "$1" == -q ]] && { quiet=1; shift }
+  local where=""
+  [[ -n "${1:-}" ]] && where="WHERE kind = '$(_shhist_q "$1")'"
+
+  local sep=$'\x1f' k p sql="" n=0
+  while IFS="$sep" read -r k p; do
+    if [[ "$k" == dir ]]; then
+      [[ -d "$p" ]] && continue
+    else
+      [[ -f "$p" ]] && continue
+    fi
+    _shhist_offline "$p" && continue
+    sql+="DELETE FROM frecency WHERE kind = '$(_shhist_q "$k")' AND path = '$(_shhist_q "$p")';"$'\n'
+    (( n++ ))
+  done < <("$SHHIST_SQLITE" -batch -noheader -cmd '.timeout 300' -separator "$sep" \
+             "$SHHIST_DB" "SELECT kind, path FROM frecency $where;")
+
+  # Feed via stdin: the script can exceed the argv size limit.
+  if (( n )); then
+    print -r -- "BEGIN; $sql COMMIT;" \
+      | "$SHHIST_SQLITE" -batch -noheader -cmd '.timeout 300' "$SHHIST_DB" >/dev/null
+  fi
+  (( quiet )) || print "shhist-prune: removed $n stale entries"
+}
+
+# ---------------------------------------------------------------------------
 # Shell hooks
 # ---------------------------------------------------------------------------
 # preexec: log the command line, and bump frecency for any existing file
@@ -128,6 +287,7 @@ _shhist_preexec() {
   # File frecency: scan up to 8 non-option arguments for existing files.
   local -a words
   words=(${(z)cmdline})
+  (( ${SHHIST_TRACK_MV:-1} )) && _shhist_plan_mv "${words[@]}"
   local w p n=0
   for w in "${words[@]:1}"; do
     (( n >= 8 )) && break
@@ -152,6 +312,7 @@ _shhist_preexec() {
 # precmd: attach the exit code to the command we just logged.
 _shhist_precmd() {
   local code=$?
+  _shhist_apply_mv $code
   (( SHHIST_TRACK_EXIT )) || { _SHHIST_LAST_ID=""; return 0 }
   [[ "$_SHHIST_LAST_ID" == <-> ]] || { _SHHIST_LAST_ID=""; return 0 }
   _shhist_sql "UPDATE commands SET exit_code = $code WHERE id = $_SHHIST_LAST_ID;"

@@ -42,6 +42,7 @@ _shhist_fzf_pick_path() {  # $1=kind $2=half-life $3=prompt $4=initial query (op
   (( ${5:-0} )) && extra+=(--select-1)
 
   local list_sql tmp sel
+  (( ${SHHIST_PRUNE_ON_PICK:-1} )) && shhist-prune -q "$kind"
   list_sql="$(_shhist_frecent_sql "$kind" "$halflife" '')"
   tmp="$(mktemp "${TMPDIR:-/tmp}/shhist_del.XXXXXX")"
 
@@ -235,6 +236,7 @@ bindkey "$SHHIST_BIND_HISTORY" _shhist_history_widget
 # "insert + run" apart.
 _shhist_file_widget() {
   local list_sql tmp out key sel
+  (( ${SHHIST_PRUNE_ON_PICK:-1} )) && shhist-prune -q file
   list_sql="$(_shhist_frecent_sql file "$SHHIST_HALFLIFE_FILE" '')"
   tmp="$(mktemp "${TMPDIR:-/tmp}/shhist_del.XXXXXX")"
 
