@@ -2,9 +2,92 @@
 # Sourced by widgets.zsh, last. Do not source directly.
 
 # ---------------------------------------------------------------------------
+# Ranking
+# ---------------------------------------------------------------------------
+# Number-or-default helpers: config values are spliced into SQL.
+_shhist_num() {  # $1 = value, $2 = default
+  [[ "$1" == (<->|<->.<->|.<->) ]] && print -r -- "$1" || print -r -- "$2"
+}
+_shhist_pos_int() {  # $1 = value, $2 = default
+  [[ "$1" == <-> ]] && (( $1 > 0 )) && print -r -- "$1" || print -r -- "$2"
+}
+
+# SQL score of one cmd group (aggregate over its rows' ts), higher = better.
+# Algorithms (SHHIST_SUGGEST_RANK):
+#   duallog  W * S(short) + log2(1 + S(long))       (default)
+#   dual     W * S(short) + S(long)
+#   single   S(long)                                 (previous behavior)
+#   seg      runs * weight of the newest run's age bucket (SHHIST_SUGGEST_SEGS)
+#   recent   newest run wins (zsh-autosuggestions behavior)
+# where S(h) = SUM(0.5 ^ (age / h)), short = SHHIST_HALFLIFE_CMD_SHORT,
+# long = SHHIST_HALFLIFE_CMD, W = SHHIST_SUGGEST_SHORT_WEIGHT.
+_shhist_cmd_score_sql() {  # $1 = algorithm (optional, default from config)
+  local algo="${1:-${SHHIST_SUGGEST_RANK:-duallog}}"
+  local age="(strftime('%s','now') - ts)"
+  local hs hl w
+  hs="$(_shhist_pos_int "$SHHIST_HALFLIFE_CMD_SHORT" 21600)"
+  hl="$(_shhist_pos_int "$SHHIST_HALFLIFE_CMD" 1209600)"
+  w="$(_shhist_num "$SHHIST_SUGGEST_SHORT_WEIGHT" 2)"
+  local ss="SUM(pow(0.5, $age / ${hs}.0))"
+  local sl="SUM(pow(0.5, $age / ${hl}.0))"
+  case "$algo" in
+    (dual)   print -r -- "($w * $ss + $sl)" ;;
+    (single) print -r -- "$sl" ;;
+    (recent) print -r -- "MAX(ts)" ;;
+    (seg)
+      # Rules "max_age:weight", checked in order; a bare weight is the fallback.
+      local r sql="CASE" last="0.25"
+      for r in "${SHHIST_SUGGEST_SEGS[@]}"; do
+        if [[ "$r" == *:* ]]; then
+          sql+=" WHEN MIN($age) < $(_shhist_pos_int "${r%%:*}" 3600) THEN $(_shhist_num "${r#*:}" 1)"
+        else
+          last="$(_shhist_num "$r" 0.25)"
+        fi
+      done
+      print -r -- "(COUNT(*) * $sql ELSE $last END)" ;;
+    (*)      print -r -- "($w * $ss + log2(1 + $sl))" ;;
+  esac
+}
+
+# Full ranking query for prefix candidates. Ties go to the newest run.
+_shhist_suggest_sql() {  # $1 = prefix (raw), $2 = limit, $3 = algorithm, $4 = 1 to include score
+  local q="$(_shhist_q "$1")" score="$(_shhist_cmd_score_sql "$3")" cols="cmd"
+  (( ${4:-0} )) && cols="printf('%10.3f', $score) AS score, COUNT(*) AS runs, datetime(MAX(ts), 'unixepoch', 'localtime') AS last, cmd"
+  print -r -- "
+    SELECT $cols FROM commands
+    WHERE cmd > '$q' AND cmd < '$q' || char(1114111)
+      AND instr(cmd, char(10)) = 0
+    GROUP BY cmd
+    ORDER BY $score DESC, MAX(ts) DESC
+    LIMIT $2;"
+}
+
+# Inspect ranking on real data, e.g. to compare algorithms before switching.
+#   shhist-rank [-a duallog|dual|single|seg|recent] [-n N] PREFIX
+shhist-rank() {
+  emulate -L zsh
+  local algo="" n=10 opt OPTARG OPTIND
+  while getopts 'a:n:' opt; do
+    case "$opt" in
+      (a) algo="$OPTARG" ;;
+      (n) n="$(_shhist_pos_int "$OPTARG" 10)" ;;
+      (*) print -u2 "usage: shhist-rank [-a algo] [-n N] PREFIX"; return 2 ;;
+    esac
+  done
+  shift $(( OPTIND - 1 ))
+  if [[ -z "$1" ]]; then
+    print -u2 "usage: shhist-rank [-a duallog|dual|single|seg|recent] [-n N] PREFIX"
+    return 2
+  fi
+  print -r -- "algorithm: ${algo:-${SHHIST_SUGGEST_RANK:-duallog}}"
+  "$SHHIST_SQLITE" -batch -header -column -cmd '.timeout 300' "$SHHIST_DB" \
+    "$(_shhist_suggest_sql "$*" "$n" "$algo" 1)"
+}
+
+# ---------------------------------------------------------------------------
 # Query
 # ---------------------------------------------------------------------------
-# Best command starting with $1, ranked by decayed run count. The top
+# Best command starting with $1, ranked by _shhist_cmd_score_sql. The top
 # $SHHIST_SUGGEST_CANDIDATES rows go through the strict scan, so a command
 # whose program or file operands are gone right now is skipped -- not
 # deleted: it may work again later (venv activated, disk mounted, ...).
@@ -13,18 +96,12 @@
 # REPLY = suggestion, '' if none.
 _shhist_suggest_query() {  # $1 = prefix
   emulate -L zsh
-  local prefix="$1" q cand
+  local prefix="$1" cand
   REPLY=""
   [[ -n "$prefix" ]] || return 1
-  q="$(_shhist_q "$prefix")"
   local -a cands
-  cands=("${(@f)$(_shhist_sql "
-    SELECT cmd FROM commands
-    WHERE cmd > '$q' AND cmd < '$q' || char(1114111)
-      AND instr(cmd, char(10)) = 0
-    GROUP BY cmd
-    ORDER BY SUM(pow(0.5, (strftime('%s','now') - ts) / CAST($SHHIST_HALFLIFE_CMD AS REAL))) DESC
-    LIMIT ${SHHIST_SUGGEST_CANDIDATES:-20};")}")
+  cands=("${(@f)$(_shhist_sql "$(_shhist_suggest_sql "$prefix" \
+    "$(_shhist_pos_int "$SHHIST_SUGGEST_CANDIDATES" 20)")")}")
   for cand in "${cands[@]}"; do
     [[ -n "$cand" && "$cand" == "$prefix"?* ]] || continue
     _shhist_cmd_scan strict "$cand" "$PWD"
