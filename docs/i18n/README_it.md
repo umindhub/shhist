@@ -39,8 +39,12 @@ ovunque     $ vim <Ctrl+G>     # scegli un file frequente, il percorso viene ins
   `ctrl-]` inserisce **ed esegue** in un colpo solo (associabile a Cmd+Invio).
 - **Eliminazione sul posto**: `ctrl-x` in qualsiasi selettore rimuove la
   directory, il file o il comando evidenziato e lascia il selettore aperto.
-- **Sorgente per zsh-autosuggestions**: suggerimenti ordinati per frequenza
-  decaduta da SQLite.
+- **Suggerimenti in linea integrati**: testo fantasma grigio da SQLite,
+  ordinato per frequenza decaduta; sostituisce zsh-autosuggestions. I candidati
+  il cui programma o i cui operandi file mancano in questo momento vengono saltati.
+- **Dimentica i comandi rotti**: un comando che fallisce perché il programma
+  non esiste (`command not found`) o manca un operando file/directory
+  (`sh missing.sh`, `cd nope`) viene subito rimosso dalla cronologia.
 - **Importazione della cronologia**: `shhist-import` importa una sola volta la
   tua cronologia zsh esistente, conservando i timestamp.
 
@@ -48,12 +52,14 @@ ovunque     $ vim <Ctrl+G>     # scegli un file frequente, il percorso viene ins
 
 - zsh, [fzf](https://github.com/junegunn/fzf) >= 0.45,
   sqlite3 compilato con le funzioni matematiche (quello di Homebrew lo è)
-- opzionale: [zsh-autosuggestions](https://github.com/zsh-users/zsh-autosuggestions)
-  per la sorgente dei suggerimenti
 
 ```sh
-brew install sqlite fzf zsh-autosuggestions
+brew install sqlite fzf
 ```
+
+shhist ha i propri suggerimenti in linea, quindi rimuovi `zsh-autosuggestions`
+da `plugins=(...)` di oh-my-zsh. Finché resta caricato, shhist gli fornisce
+solo i dati (`SHHIST_SUGGEST_MODE`) e mostra un promemoria all'avvio.
 
 ## Installazione
 
@@ -65,7 +71,7 @@ git clone https://github.com/umindhub/shhist.git ~/.config/shhist
 ~/.config/shhist/install.sh
 ```
 
-shhist deve essere caricato dopo le scorciatoie di fzf e zsh-autosuggestions;
+shhist deve essere caricato dopo le scorciatoie di fzf e gli altri plugin;
 l'installer aggiunge la riga in fondo a `.zshrc`, cosa che di norma basta.
 Per aggiornare:
 
@@ -198,6 +204,44 @@ Una visita di N secondi fa vale `0.5 ^ (N / half_life)` di una visita adesso.
 Il decadimento viene calcolato al momento della query, quindi cambiare
 un'emivita si applica subito a tutti i dati esistenti.
 
+## Suggerimenti in linea
+
+Mentre scrivi, il comando passato più adatto compare in grigio dopo il cursore.
+Freccia destra / Fine lo accetta tutto, Ctrl+F o Alt+Destra (`forward-word`)
+accetta la parola successiva; altrove nella riga questi tasti funzionano come
+sempre (Ctrl+F sposta ancora di un carattere). Dopo la navigazione nella
+cronologia (Su, `Ctrl+R`) non viene mostrato alcun suggerimento finché non
+scrivi di nuovo. Un candidato viene saltato (non eliminato) se il programma non
+si trova o manca un operando di percorso nella directory corrente: potrebbe
+tornare a funzionare più tardi, ad esempio dopo aver attivato un venv.
+
+## Dimenticare i comandi rotti
+
+Quando un comando termina con 1-127, shhist ne verifica il motivo:
+
+- **programma non trovato** (`gti status`, un `./build.sh` inesistente):
+  vengono eliminate tutte le righe di quel comando;
+- **percorso assoluto / `~` mancante** (`cat ~/gone.txt`): vengono eliminate
+  tutte le righe;
+- **percorso relativo mancante** (`sh missing.sh`, `cd nope`): vengono
+  eliminate solo le righe registrate in quella directory.
+
+I percorsi sono riconosciuti in modo prudente: lo script di un interprete
+(`sh`, `python3`, `node`, ...: `SHHIST_INTERP_CMDS`), ogni operando di un
+comando sui file (`cd`, `cat`, `vim`, ...: `SHHIST_PATH_CMDS`) e le parole che
+iniziano con `/`, `~/`, `./`, `../`. Gli strumenti i cui operandi sono pattern,
+URL o destinazioni non ancora create (`git`, `grep`, `mkdir`, `cp`, ...:
+`SHHIST_NOCHECK_CMDS`) non vengono mai controllati. Ctrl+C e gli altri segnali
+(uscita >= 128) non contano mai come fallimento.
+
+Per la cronologia registrata in precedenza (o importata), esegui lo stesso
+controllo in blocco:
+
+```sh
+shhist-clean -n    # anteprima
+shhist-clean       # rimuovi
+```
+
 ## Configurazione
 
 I valori predefiniti si trovano in `config.zsh` (versionato). Metti le tue
@@ -222,7 +266,14 @@ export SHHIST_HALFLIFE_DIR=$((14 * 24 * 3600))
 | `SHHIST_BIND_TAB` | `^I` | selettore Tab sulle righe `j`/`v`/`shf` (`''` lo disattiva) |
 | `SHHIST_FILE_RUN_KEY` | `ctrl-]` | tasto inserisci + esegui in `Ctrl+R` / `Ctrl+G` |
 | `SHHIST_DELETE_KEY` | `ctrl-x` | tasto di eliminazione in tutti i selettori |
-| `SHHIST_SUGGEST_MODE` | `B` | autosuggerimenti: `A` sqlite / `B` cronologia zsh / `AB` prima sqlite, poi cronologia |
+| `SHHIST_SUGGEST` | `1` | suggerimenti in linea integrati (`0` li disattiva) |
+| `SHHIST_SUGGEST_STYLE` | `fg=8` | evidenziazione del testo suggerito |
+| `SHHIST_BIND_ACCEPT_WORD` | `^F` | accetta la parola successiva del suggerimento (`''` disattiva) |
+| `SHHIST_SUGGEST_CANDIDATES` | `20` | candidati migliori controllati per ricerca |
+| `SHHIST_SUGGEST_ACCEPT_WIDGETS` / `_PARTIAL_WIDGETS` | `forward-char` ... / `forward-word` ... | widget che accettano tutto / una parola |
+| `SHHIST_SUGGEST_MODE` | `B` | solo finché zsh-autosuggestions è caricato: `A` sqlite / `B` cronologia zsh / `AB` entrambe |
+| `SHHIST_PRUNE_FAILED` | `1` | dimentica i comandi falliti per programma o percorso mancante |
+| `SHHIST_INTERP_CMDS` / `SHHIST_PATH_CMDS` / `SHHIST_NOCHECK_CMDS` | vedi `config.zsh` | come vengono controllati i percorsi degli operandi |
 | `SHHIST_HALFLIFE_DIR` / `_FILE` / `_CMD` | 7 / 3 / 14 giorni | emivite della frecency (secondi) |
 | `SHHIST_TRACK_EXIT` | `1` | registra i codici di uscita |
 | `SHHIST_FZF_LIMIT` | `20000` | righe massime passate a `Ctrl+R` |
@@ -256,7 +307,7 @@ sqlite3 ~/.config/shhist-data/history.db \
 ~/.config/shhist/uninstall.sh
 ```
 
-Rimuove la directory di installazione (`core.zsh`, `widgets.zsh`, `config.zsh`,
+Rimuove la directory di installazione (`core.zsh`, `widgets.zsh`, `suggest.zsh`, `config.zsh`,
 il tuo `config.local.zsh`) e la riga source in `~/.zshrc`. Il database della
 cronologia viene conservato per default: reinstallando in seguito viene ripreso
 così com'è. Passa `--purge-data` per eliminarlo, oppure `-f` per saltare la

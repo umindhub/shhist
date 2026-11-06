@@ -40,8 +40,13 @@ partout     $ vim <Ctrl+G>     # choisir un fichier fréquent, son chemin est in
   `ctrl-]` insère **et exécute** d'un seul geste (peut être associé à Cmd+Entrée).
 - **Suppression sur place** : `ctrl-x` dans n'importe quel sélecteur supprime le
   répertoire, le fichier ou la commande en surbrillance, sans fermer le sélecteur.
-- **Source pour zsh-autosuggestions** : suggestions classées par fréquence
-  amortie depuis SQLite.
+- **Suggestions en ligne intégrées** : texte fantôme gris issu de SQLite,
+  classé par fréquence amortie ; remplace zsh-autosuggestions. Les candidats
+  dont le programme ou les opérandes fichier manquent actuellement sont ignorés.
+- **Oublie les commandes cassées** : une commande qui échoue parce que son
+  programme n'existe pas (`command not found`) ou qu'un opérande
+  fichier/répertoire manque (`sh missing.sh`, `cd nope`) est aussitôt
+  supprimée de l'historique.
 - **Import de l'historique** : `shhist-import` importe une seule fois votre
   historique zsh existant, horodatages conservés.
 
@@ -49,12 +54,14 @@ partout     $ vim <Ctrl+G>     # choisir un fichier fréquent, son chemin est in
 
 - zsh, [fzf](https://github.com/junegunn/fzf) >= 0.45,
   sqlite3 compilé avec les fonctions mathématiques (celui de Homebrew l'est)
-- optionnel : [zsh-autosuggestions](https://github.com/zsh-users/zsh-autosuggestions)
-  pour la source de suggestions
 
 ```sh
-brew install sqlite fzf zsh-autosuggestions
+brew install sqlite fzf
 ```
+
+shhist a ses propres suggestions en ligne : retirez donc `zsh-autosuggestions`
+de `plugins=(...)` d'oh-my-zsh. Tant qu'il reste chargé, shhist se contente de
+l'alimenter (`SHHIST_SUGGEST_MODE`) et affiche un rappel au démarrage.
 
 ## Installation
 
@@ -66,7 +73,7 @@ git clone https://github.com/umindhub/shhist.git ~/.config/shhist
 ~/.config/shhist/install.sh
 ```
 
-shhist doit être chargé après les raccourcis de fzf et zsh-autosuggestions ;
+shhist doit être chargé après les raccourcis de fzf et les autres plugins ;
 l'installeur ajoute la ligne à la fin de `.zshrc`, ce qui suffit normalement.
 Pour mettre à jour :
 
@@ -202,6 +209,45 @@ Une visite d'il y a N secondes vaut `0.5 ^ (N / half_life)` d'une visite
 actuelle. La décroissance étant calculée à la requête, modifier une demi-vie
 s'applique instantanément à toutes les données existantes.
 
+## Suggestions en ligne
+
+Pendant la saisie, la commande passée qui correspond le mieux apparaît en gris
+après le curseur. Flèche droite / Fin l'accepte en entier, Ctrl+F ou
+Alt+Droite (`forward-word`) accepte le mot suivant ; ailleurs dans la ligne,
+ces touches gardent leur comportement habituel (Ctrl+F avance toujours d'un
+caractère). Après une navigation dans l'historique (Haut, `Ctrl+R`), aucune
+suggestion n'apparaît avant que vous tapiez à nouveau. Un candidat est ignoré
+(pas supprimé) si son programme est introuvable ou si un opérande chemin
+manque dans le répertoire courant : il pourra refonctionner plus tard, par
+exemple après l'activation d'un venv.
+
+## Oublier les commandes cassées
+
+Quand une commande se termine avec 1-127, shhist en vérifie la raison :
+
+- **programme introuvable** (`gti status`, un `./build.sh` absent) : toutes
+  les lignes de cette commande sont supprimées ;
+- **chemin absolu / `~` manquant** (`cat ~/gone.txt`) : toutes les lignes
+  sont supprimées ;
+- **chemin relatif manquant** (`sh missing.sh`, `cd nope`) : seules les lignes
+  enregistrées dans ce répertoire sont supprimées.
+
+Les chemins sont reconnus de façon prudente : le script d'un interpréteur
+(`sh`, `python3`, `node`, ... : `SHHIST_INTERP_CMDS`), chaque opérande d'une
+commande de fichiers (`cd`, `cat`, `vim`, ... : `SHHIST_PATH_CMDS`) et les
+mots commençant par `/`, `~/`, `./`, `../`. Les outils dont les opérandes sont
+des motifs, des URL ou des cibles pas encore créées (`git`, `grep`, `mkdir`,
+`cp`, ... : `SHHIST_NOCHECK_CMDS`) ne sont jamais vérifiés. Ctrl+C et les
+autres signaux (sortie >= 128) ne comptent jamais comme un échec.
+
+Pour l'historique enregistré auparavant (ou importé), lancez la même
+vérification en lot :
+
+```sh
+shhist-clean -n    # aperçu
+shhist-clean       # supprimer
+```
+
 ## Configuration
 
 Les valeurs par défaut sont dans `config.zsh` (versionné). Placez vos réglages
@@ -226,7 +272,14 @@ export SHHIST_HALFLIFE_DIR=$((14 * 24 * 3600))
 | `SHHIST_BIND_TAB` | `^I` | sélecteur Tab sur les lignes `j`/`v`/`shf` (`''` le désactive) |
 | `SHHIST_FILE_RUN_KEY` | `ctrl-]` | touche insérer + exécuter dans `Ctrl+R` / `Ctrl+G` |
 | `SHHIST_DELETE_KEY` | `ctrl-x` | touche de suppression dans tous les sélecteurs |
-| `SHHIST_SUGGEST_MODE` | `B` | autosuggestions : `A` sqlite / `B` historique zsh / `AB` sqlite puis historique |
+| `SHHIST_SUGGEST` | `1` | suggestions en ligne intégrées (`0` les désactive) |
+| `SHHIST_SUGGEST_STYLE` | `fg=8` | mise en évidence du texte suggéré |
+| `SHHIST_BIND_ACCEPT_WORD` | `^F` | accepter le mot suivant de la suggestion (`''` désactive) |
+| `SHHIST_SUGGEST_CANDIDATES` | `20` | meilleurs candidats vérifiés par recherche |
+| `SHHIST_SUGGEST_ACCEPT_WIDGETS` / `_PARTIAL_WIDGETS` | `forward-char` ... / `forward-word` ... | widgets qui acceptent tout / un mot |
+| `SHHIST_SUGGEST_MODE` | `B` | seulement si zsh-autosuggestions est chargé : `A` sqlite / `B` historique zsh / `AB` les deux |
+| `SHHIST_PRUNE_FAILED` | `1` | oublier les commandes échouées à cause d'un programme ou chemin manquant |
+| `SHHIST_INTERP_CMDS` / `SHHIST_PATH_CMDS` / `SHHIST_NOCHECK_CMDS` | voir `config.zsh` | comment les opérandes sont vérifiés |
 | `SHHIST_HALFLIFE_DIR` / `_FILE` / `_CMD` | 7 / 3 / 14 jours | demi-vies de frecency (secondes) |
 | `SHHIST_TRACK_EXIT` | `1` | enregistrer les codes de sortie |
 | `SHHIST_FZF_LIMIT` | `20000` | nombre max. de lignes pour `Ctrl+R` |
@@ -260,7 +313,7 @@ sqlite3 ~/.config/shhist-data/history.db \
 ~/.config/shhist/uninstall.sh
 ```
 
-Supprime le répertoire d'installation (`core.zsh`, `widgets.zsh`, `config.zsh`,
+Supprime le répertoire d'installation (`core.zsh`, `widgets.zsh`, `suggest.zsh`, `config.zsh`,
 votre `config.local.zsh`) et la ligne source de `~/.zshrc`. La base de
 l'historique est conservée par défaut : une réinstallation ultérieure la
 retrouve telle quelle. Passez `--purge-data` pour la supprimer aussi, ou `-f`

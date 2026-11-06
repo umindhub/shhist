@@ -39,8 +39,13 @@ overal      $ vim <Ctrl+G>     # kies een veelgebruikt bestand, het pad wordt in
   voegt `ctrl-]` in **en voert uit** in één keer (te koppelen aan Cmd+Enter).
 - **Ter plekke verwijderen** -- `ctrl-x` in elke kiezer verwijdert de
   gemarkeerde map, het bestand of het commando; de kiezer blijft open.
-- **Bron voor zsh-autosuggestions** -- suggesties gerangschikt op vervallen
-  frequentie uit SQLite.
+- **Ingebouwde inline-suggesties** -- grijze spooktekst uit SQLite,
+  gerangschikt op vervallen frequentie; vervangt zsh-autosuggestions.
+  Kandidaten waarvan het programma of bestandsoperand nu ontbreekt, worden
+  overgeslagen.
+- **Vergeet kapotte commando's** -- een commando dat faalt omdat het programma
+  niet bestaat (`command not found`) of een bestands-/mapoperand ontbreekt
+  (`sh missing.sh`, `cd nope`), wordt meteen uit de geschiedenis verwijderd.
 - **Geschiedenis importeren** -- eenmalig `shhist-import` van je bestaande
   zsh-geschiedenis, met behoud van tijdstempels.
 
@@ -48,12 +53,15 @@ overal      $ vim <Ctrl+G>     # kies een veelgebruikt bestand, het pad wordt in
 
 - zsh, [fzf](https://github.com/junegunn/fzf) >= 0.45,
   sqlite3 gebouwd met wiskundige functies (die van Homebrew wel)
-- optioneel: [zsh-autosuggestions](https://github.com/zsh-users/zsh-autosuggestions)
-  voor de suggestiebron
 
 ```sh
-brew install sqlite fzf zsh-autosuggestions
+brew install sqlite fzf
 ```
+
+shhist heeft eigen inline-suggesties, dus haal `zsh-autosuggestions` uit
+`plugins=(...)` van oh-my-zsh. Zolang het nog geladen is, levert shhist er
+alleen data aan (`SHHIST_SUGGEST_MODE`) en toont het bij het opstarten een
+herinnering.
 
 ## Installatie
 
@@ -65,7 +73,7 @@ git clone https://github.com/umindhub/shhist.git ~/.config/shhist
 ~/.config/shhist/install.sh
 ```
 
-shhist moet na de fzf-sneltoetsen en zsh-autosuggestions worden geladen; het
+shhist moet na de fzf-sneltoetsen en andere plugins worden geladen; het
 script voegt de regel toe aan het einde van `.zshrc`, wat daar normaal voor zorgt.
 Bijwerken is simpelweg:
 
@@ -199,6 +207,44 @@ Een bezoek van N seconden geleden telt als `0.5 ^ (N / half_life)` van een
 bezoek nu. Het verval wordt bij het opvragen berekend, dus een gewijzigde
 halfwaardetijd geldt meteen voor alle bestaande gegevens.
 
+## Inline-suggesties
+
+Tijdens het typen verschijnt het best passende eerdere commando als grijze
+tekst achter de cursor. Pijl rechts / End neemt alles over, Ctrl+F of
+Alt+Rechts (`forward-word`) het volgende woord; elders in de regel werken deze
+toetsen zoals gewoonlijk (Ctrl+F gaat nog steeds één teken vooruit). Na
+bladeren door de geschiedenis (Omhoog, `Ctrl+R`) verschijnt geen suggestie tot
+je weer typt. Een kandidaat wordt overgeslagen (niet verwijderd) als het
+programma niet gevonden wordt of een padoperand in de huidige map ontbreekt --
+het kan later weer werken, bijvoorbeeld na het activeren van een venv.
+
+## Kapotte commando's vergeten
+
+Als een commando eindigt met 1-127, controleert shhist waarom:
+
+- **programma niet gevonden** (`gti status`, een ontbrekende `./build.sh`) --
+  alle rijen van dat commando worden verwijderd;
+- **ontbrekend absoluut / `~`-pad** (`cat ~/gone.txt`) -- alle rijen worden
+  verwijderd;
+- **ontbrekend relatief pad** (`sh missing.sh`, `cd nope`) -- alleen de rijen
+  die in die map zijn vastgelegd, worden verwijderd.
+
+Paden worden voorzichtig herkend: het script van een interpreter (`sh`,
+`python3`, `node`, ... -- `SHHIST_INTERP_CMDS`), elke operand van een
+bestandscommando (`cd`, `cat`, `vim`, ... -- `SHHIST_PATH_CMDS`), en woorden
+die beginnen met `/`, `~/`, `./`, `../`. Tools waarvan de operanden patronen,
+URL's of nog niet aangemaakte doelen zijn (`git`, `grep`, `mkdir`, `cp`, ... --
+`SHHIST_NOCHECK_CMDS`), worden nooit op paden gecontroleerd. Ctrl+C en andere
+signalen (exit >= 128) tellen nooit als mislukking.
+
+Voor eerder vastgelegde (of geïmporteerde) geschiedenis voer je dezelfde
+controle in één keer uit:
+
+```sh
+shhist-clean -n    # voorbeeld
+shhist-clean       # verwijderen
+```
+
 ## Configuratie
 
 De standaardwaarden staan in `config.zsh` (onder versiebeheer). Zet je eigen
@@ -223,7 +269,14 @@ export SHHIST_HALFLIFE_DIR=$((14 * 24 * 3600))
 | `SHHIST_BIND_TAB` | `^I` | Tab-kiezer op `j`/`v`/`shf`-regels (`''` schakelt uit) |
 | `SHHIST_FILE_RUN_KEY` | `ctrl-]` | invoegen-+-uitvoeren-toets in `Ctrl+R` / `Ctrl+G` |
 | `SHHIST_DELETE_KEY` | `ctrl-x` | verwijdertoets in alle kiezers |
-| `SHHIST_SUGGEST_MODE` | `B` | autosuggesties: `A` sqlite / `B` zsh-geschiedenis / `AB` eerst sqlite, dan geschiedenis |
+| `SHHIST_SUGGEST` | `1` | ingebouwde inline-suggesties (`0` schakelt uit) |
+| `SHHIST_SUGGEST_STYLE` | `fg=8` | markering van de suggestietekst |
+| `SHHIST_BIND_ACCEPT_WORD` | `^F` | volgend woord van de suggestie overnemen (`''` schakelt uit) |
+| `SHHIST_SUGGEST_CANDIDATES` | `20` | per zoekopdracht gecontroleerde topkandidaten |
+| `SHHIST_SUGGEST_ACCEPT_WIDGETS` / `_PARTIAL_WIDGETS` | `forward-char` ... / `forward-word` ... | widgets die alles / één woord overnemen |
+| `SHHIST_SUGGEST_MODE` | `B` | alleen zolang zsh-autosuggestions geladen is: `A` sqlite / `B` zsh-geschiedenis / `AB` beide |
+| `SHHIST_PRUNE_FAILED` | `1` | mislukte commando's met ontbrekend programma of pad vergeten |
+| `SHHIST_INTERP_CMDS` / `SHHIST_PATH_CMDS` / `SHHIST_NOCHECK_CMDS` | zie `config.zsh` | hoe operanden op paden worden gecontroleerd |
 | `SHHIST_HALFLIFE_DIR` / `_FILE` / `_CMD` | 7 / 3 / 14 dagen | frecency-halfwaardetijden (seconden) |
 | `SHHIST_TRACK_EXIT` | `1` | exitcodes vastleggen |
 | `SHHIST_FZF_LIMIT` | `20000` | max. aantal regels voor `Ctrl+R` |
@@ -257,7 +310,7 @@ sqlite3 ~/.config/shhist-data/history.db \
 ~/.config/shhist/uninstall.sh
 ```
 
-Verwijdert de installatiemap (`core.zsh`, `widgets.zsh`, `config.zsh`, je
+Verwijdert de installatiemap (`core.zsh`, `widgets.zsh`, `suggest.zsh`, `config.zsh`, je
 `config.local.zsh`) en de source-regel in `~/.zshrc`. De geschiedenisdatabase
 blijft standaard behouden -- een latere herinstallatie pakt hem meteen weer op.
 Geef `--purge-data` mee om hem ook te verwijderen, of `-f` om de bevestiging over

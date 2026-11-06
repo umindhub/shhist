@@ -40,8 +40,8 @@ if [[ "${REPO_DIR:A}" == "${INSTALL_DIR:A}" ]]; then
   ok "repo is the install dir ($INSTALL_DIR) -- in-place install, updates via git pull"
 else
   mkdir -p "$INSTALL_DIR"
-  cp "$REPO_DIR/core.zsh" "$REPO_DIR/widgets.zsh" "$INSTALL_DIR/"
-  ok "installed core.zsh, widgets.zsh -> $INSTALL_DIR"
+  cp "$REPO_DIR/core.zsh" "$REPO_DIR/widgets.zsh" "$REPO_DIR/suggest.zsh" "$INSTALL_DIR/"
+  ok "installed core.zsh, widgets.zsh, suggest.zsh -> $INSTALL_DIR"
 
   # config.zsh holds user edits: install once, never overwrite.
   if [[ -f "$INSTALL_DIR/config.zsh" ]]; then
@@ -58,7 +58,7 @@ if [[ -f "$ZSHRC" ]] && grep -qF "$SOURCE_LINE" "$ZSHRC"; then
 else
   {
     print ""
-    print "# shhist -- load AFTER fzf keybindings and zsh-autosuggestions"
+    print "# shhist -- load AFTER fzf keybindings and other plugins"
     print "$SOURCE_LINE"
   } >> "$ZSHRC"
   ok "added source line to $ZSHRC"
@@ -70,6 +70,10 @@ print "Done. Next:"
 print "  1. Open a new terminal (or: source $INSTALL_DIR/widgets.zsh)"
 print "  2. Optionally import your existing zsh history once:  shhist-import"
 print ""
+if grep -qE '^[^#]*zsh-autosuggestions' "$ZSHRC" 2>/dev/null; then
+  warn "zsh-autosuggestions is enabled in $ZSHRC -- remove it from plugins=(...) to use shhist's built-in suggestions"
+  print ""
+fi
 if [[ "${REPO_DIR:A}" == "${INSTALL_DIR:A}" ]]; then
   print "To update later:  git -C $INSTALL_DIR pull"
 else

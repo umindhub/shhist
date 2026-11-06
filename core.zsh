@@ -268,6 +268,215 @@ shhist-prune() {
 }
 
 # ---------------------------------------------------------------------------
+# Broken commands: program not found, file/dir operand missing
+# ---------------------------------------------------------------------------
+# Is $1 (a raw (z)-split word) a path that does not exist? Relative paths
+# resolve against $2; with $3=1, cdpath entries count too (cd/pushd).
+# On success REPLY = abs | rel. Returns 1 when present or not checkable.
+_shhist_path_missing() {  # $1 = raw word, $2 = base dir, $3 = use cdpath
+  local w="$1" base="$2" p full d
+  # Expansions, globs, brace/process substitution: unknowable at rest.
+  [[ "$w" == *[\$\`\*\?\[\{\(]* ]] && return 1
+  p="${(Q)w}"
+  [[ -n "$p" && "$p" != (.|..) ]] || return 1
+  if [[ "$p" == '~' || "$p" == '~/'* ]]; then
+    p="${HOME}${p#\~}"
+  elif [[ "$p" == '~'* ]]; then
+    return 1                                   # ~user / named dirs
+  fi
+  if [[ "$p" == /* ]]; then
+    full="$p"; REPLY=abs
+  else
+    [[ -n "$base" ]] || return 1
+    full="$base/$p"; REPLY=rel
+  fi
+  [[ -e "$full" || -L "$full" ]] && return 1
+  _shhist_offline "${full:a}" && return 1
+  if (( ${3:-0} )) && [[ "$REPLY" == rel ]]; then
+    for d in "${cdpath[@]}"; do
+      [[ -d "$d/$p" ]] && return 1
+    done
+  fi
+  return 0
+}
+
+# Inspect one command line for things that can't work right now.
+#   REPLY = cmd -> a command word resolves to nothing (alias, function,
+#                  builtin, PATH, directory for auto_cd)
+#           abs -> an absolute or ~ path operand is missing
+#           rel -> a relative path operand is missing (relative to $3)
+#           ''  -> nothing wrong found
+# Modes: strict = only operands that are certainly paths (used to filter
+# suggestions); fail = also guess paths from shape (used after a non-zero
+# exit, where a wrong guess costs little).
+_shhist_cmd_scan() {  # $1 = strict | fail, $2 = command line, $3 = its dir
+  emulate -L zsh
+  setopt extendedglob
+  REPLY=""
+  local mode="$1" base="$3" found="" w p name kind
+  local -i at_cmd=1 skip_seg=0 skip_next=0 opts=0 operand=0 dd=0 chdir=0 cdp=0
+  local -a words
+  words=(${(z)2})
+
+  for w in "${words[@]}"; do
+    if (( skip_next )); then
+      skip_next=0
+      continue
+    fi
+    # Separators start a new simple command.
+    if [[ "$w" == ('&&'|'||'|';'|'|'|'|&'|'&'|'&!'|'&|'|';;'|$'\n'|'('|')'|'{'|'}') ]]; then
+      at_cmd=1 skip_seg=0 kind=""
+      # After a directory change, relative paths no longer mean $base.
+      (( chdir )) && base=""
+      chdir=0
+      continue
+    fi
+    # Redirection operator: skip it and its target.
+    if [[ "$w" == [0-9]#[\<\>]* || "$w" == '&>'* ]]; then
+      skip_next=1
+      continue
+    fi
+    (( skip_seg )) && continue
+
+    if (( at_cmd )); then
+      [[ "$w" == [A-Za-z_][A-Za-z0-9_]#=* ]] && continue          # VAR=val
+      p="${(Q)w}"
+      case "$p" in
+        (if|then|else|elif|while|until|do|'!'|time|sudo|doas|command|builtin|exec|nocorrect|noglob|nohup|env)
+          continue ;;
+        (for|foreach|case|select|repeat|function|coproc|'[['|'['|test|'(('*)
+          skip_seg=1; continue ;;
+        (-*)
+          # Precommand option of unknown arity (sudo -u x ...): give up.
+          skip_seg=1; continue ;;
+      esac
+      at_cmd=0 opts=0 operand=0 dd=0 cdp=0
+      if [[ -z "$p" || "$w" == *[\$\`\*\?\[\(]* ]]; then
+        skip_seg=1
+        continue
+      fi
+      if [[ "$p" == */* ]]; then
+        # Script/program given by path.
+        if _shhist_path_missing "$w" "$base"; then
+          [[ "$REPLY" == abs ]] && found=abs || { [[ -z "$found" ]] && found=rel }
+        fi
+        name="${p:t}"
+      elif whence -- "$p" >/dev/null 2>&1; then
+        name="$p"
+      elif [[ -n "$base" && -d "$base/$p" ]]; then
+        name="$p"; chdir=1                                          # auto_cd
+        kind=nocheck
+        continue
+      else
+        REPLY=cmd
+        return 0
+      fi
+      [[ "$name" == (cd|pushd|popd|"$SHHIST_JUMP_CMD") ]] && chdir=1
+      [[ "$name" == (cd|pushd) ]] && cdp=1
+      if (( ${SHHIST_NOCHECK_CMDS[(Ie)$name]} )); then
+        kind=nocheck
+      elif (( ${SHHIST_INTERP_CMDS[(Ie)$name]} )); then
+        kind=interp
+      elif (( ${SHHIST_PATH_CMDS[(Ie)$name]} )); then
+        kind=paths
+      else
+        kind=generic
+      fi
+      continue
+    fi
+
+    # Operand of the current command.
+    [[ "$kind" == nocheck ]] && continue
+    if (( ! dd )) && [[ "$w" == -* ]]; then
+      [[ "$w" == -- ]] && dd=1
+      opts=1
+      continue
+    fi
+    p="${(Q)w}"
+    [[ -z "$p" || "$p" == +* || "$p" == <-> || "$p" == *=* ]] && continue
+
+    case "$kind" in
+      (interp)
+        # Only a first operand with no option before it is surely the
+        # script; everything after it belongs to the script.
+        skip_seg=1
+        (( opts )) && continue
+        ;;
+      (paths) ;;
+      (generic)
+        [[ "$p" == *:* ]] && continue                               # URL, host:path, a:b
+        if [[ "$p" != (/|'~'|./|../)* ]]; then
+          # Shape guess, fail mode only: a/b where a/ exists but b doesn't.
+          [[ "$mode" == fail && "$p" == */* && -n "$base" && -d "$base/${p:h}" ]] || continue
+        fi
+        ;;
+    esac
+    if _shhist_path_missing "$w" "$base" $cdp; then
+      [[ "$REPLY" == abs ]] && found=abs || { [[ -z "$found" ]] && found=rel }
+    fi
+  done
+  REPLY="$found"
+}
+
+# Delete a broken command. A missing program or absolute path is broken
+# everywhere, so every row of that command goes; a missing relative path
+# only drops the rows recorded in that same directory.
+_shhist_forget_sql() {  # $1 = reason (cmd|abs|rel), $2 = command line, $3 = dir
+  local where="cmd = '$(_shhist_q "$2")'"
+  [[ "$1" == rel ]] && where+=" AND dir = '$(_shhist_q "$3")'"
+  print -r -- "DELETE FROM commands WHERE $where;"
+}
+
+# Batch version of the post-command check, for history recorded before
+# it existed (or imported). Rows with a failing exit code get the fail
+# scan, all others the strict one.
+#   shhist-clean -n   list what would be removed
+#   shhist-clean      remove it
+shhist-clean() {
+  emulate -L zsh
+  local dry=0
+  [[ "$1" == -n ]] && dry=1
+  local fs=$'\x1f' rs=$'\x1e' row cmd dir code mode key sql="" n=0
+  local -A seen
+  local -a rows
+  rows=("${(@ps:$rs:)$("$SHHIST_SQLITE" -batch -noheader -cmd '.timeout 300' \
+           -separator "$fs" -newline "$rs" "$SHHIST_DB" "
+    SELECT cmd, ifnull(dir, ''), ifnull(exit_code, '') FROM commands
+    WHERE id IN (SELECT MAX(id) FROM commands GROUP BY cmd, dir);")}")
+
+  for row in "${rows[@]}"; do
+    [[ -n "$row" ]] || continue
+    cmd="${row%%$fs*}"; row="${row#*$fs}"
+    dir="${row%%$fs*}"; code="${row#*$fs}"
+    mode=strict
+    [[ "$code" == <-> ]] && (( code != 0 && code < 128 )) && mode=fail
+    _shhist_cmd_scan "$mode" "$cmd" "$dir"
+    [[ -n "$REPLY" ]] || continue
+    key="$cmd"
+    [[ "$REPLY" == rel ]] && key+="$fs$dir"
+    (( ${+seen[$key]} || ${+seen[$cmd]} )) && continue
+    seen[$key]=1
+    (( n++ ))
+    if (( dry )); then
+      print -r -- "[$REPLY] ${cmd//$'\n'/ ⏎ }${dir:+   ($dir)}"
+    else
+      sql+="$(_shhist_forget_sql "$REPLY" "$cmd" "$dir")"$'\n'
+    fi
+  done
+
+  if (( dry )); then
+    print "shhist-clean: $n commands would be removed (run without -n to remove)"
+    return 0
+  fi
+  # Feed via stdin: the script can exceed the argv size limit.
+  if (( n )); then
+    print -r -- "BEGIN; $sql COMMIT;" \
+      | "$SHHIST_SQLITE" -batch -noheader -cmd '.timeout 300' "$SHHIST_DB" >/dev/null
+  fi
+  print "shhist-clean: removed $n commands"
+}
+
+# ---------------------------------------------------------------------------
 # Shell hooks
 # ---------------------------------------------------------------------------
 # preexec: log the command line, and bump frecency for any existing file
@@ -307,16 +516,29 @@ _shhist_preexec() {
   done
 
   typeset -g _SHHIST_LAST_ID="$(_shhist_sql "$sql")"
+  typeset -g _SHHIST_LAST_CMD="$cmdline" _SHHIST_LAST_DIR="$PWD"
 }
 
-# precmd: attach the exit code to the command we just logged.
+# precmd: attach the exit code to the command we just logged. A failed
+# command whose program or file operand doesn't exist is forgotten instead
+# (signals, i.e. exit >= 128 such as Ctrl+C, never count as failures).
 _shhist_precmd() {
   local code=$?
   _shhist_apply_mv $code
-  (( SHHIST_TRACK_EXIT )) || { _SHHIST_LAST_ID=""; return 0 }
-  [[ "$_SHHIST_LAST_ID" == <-> ]] || { _SHHIST_LAST_ID=""; return 0 }
-  _shhist_sql "UPDATE commands SET exit_code = $code WHERE id = $_SHHIST_LAST_ID;"
-  _SHHIST_LAST_ID=""
+  local id="$_SHHIST_LAST_ID" cmd="$_SHHIST_LAST_CMD" dir="$_SHHIST_LAST_DIR"
+  _SHHIST_LAST_ID="" _SHHIST_LAST_CMD="" _SHHIST_LAST_DIR=""
+  [[ "$id" == <-> ]] || return 0
+
+  if (( ${SHHIST_PRUNE_FAILED:-1} && code != 0 && code < 128 )); then
+    _shhist_cmd_scan fail "$cmd" "$dir"
+    if [[ -n "$REPLY" ]]; then
+      _shhist_sql "$(_shhist_forget_sql "$REPLY" "$cmd" "$dir")" >/dev/null
+      return 0
+    fi
+  fi
+
+  (( SHHIST_TRACK_EXIT )) || return 0
+  _shhist_sql "UPDATE commands SET exit_code = $code WHERE id = $id;"
 }
 
 # chpwd: every directory change feeds the jump database.

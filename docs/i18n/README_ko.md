@@ -31,18 +31,21 @@ shhist는 세 가지를 기억합니다: 실행한 **모든 명령**, 들어간 
 - **원스트로크 실행** —— `Ctrl+R`과 `Ctrl+G`에서 Enter는 삽입, `ctrl-]`는 삽입 **후 즉시 실행**
   (Cmd+Enter에 매핑 가능).
 - **제자리 삭제** —— 모든 선택기에서 `ctrl-x`로 강조된 디렉터리, 파일, 명령을 삭제하며 선택기는 열린 상태를 유지합니다.
-- **zsh-autosuggestions 소스** —— SQLite의 감쇠된 빈도로 제안 순위를 매깁니다.
+- **내장 인라인 제안** —— SQLite의 감쇠된 빈도로 순위를 매긴 회색 고스트 텍스트로, zsh-autosuggestions를 대체합니다. 프로그램이나 파일 인자가 지금 존재하지 않는 후보는 건너뜁니다.
+- **실패한 명령 잊기** —— 프로그램이 없거나(`command not found`) 파일/디렉터리 인자가 없어서(`sh missing.sh`, `cd nope`) 실패한 명령은 즉시 히스토리에서 삭제됩니다.
 - **히스토리 가져오기** —— `shhist-import`로 기존 zsh 히스토리를 한 번에 가져오며 타임스탬프를 보존합니다.
 
 ## 요구 사항
 
 - zsh, [fzf](https://github.com/junegunn/fzf) >= 0.45,
   수학 함수가 포함되어 빌드된 sqlite3 (Homebrew 버전이면 됨)
-- 선택: 제안 소스로 쓸 [zsh-autosuggestions](https://github.com/zsh-users/zsh-autosuggestions)
 
 ```sh
-brew install sqlite fzf zsh-autosuggestions
+brew install sqlite fzf
 ```
+
+shhist는 자체 인라인 제안을 제공하므로 oh-my-zsh의 `plugins=(...)`에서 `zsh-autosuggestions`를
+제거하세요. 로드되어 있는 동안 shhist는 데이터만 공급하며(`SHHIST_SUGGEST_MODE`) 시작 시 알림을 표시합니다.
 
 ## 설치
 
@@ -53,7 +56,7 @@ git clone https://github.com/umindhub/shhist.git ~/.config/shhist
 ~/.config/shhist/install.sh
 ```
 
-shhist는 fzf 키 바인딩과 zsh-autosuggestions 이후에 로드되어야 합니다. 설치 스크립트는 `.zshrc` 끝에
+shhist는 fzf 키 바인딩과 다른 플러그인 이후에 로드되어야 합니다. 설치 스크립트는 `.zshrc` 끝에
 추가하므로 보통은 이 조건을 만족합니다. 업데이트는 다음과 같습니다:
 
 ```sh
@@ -173,6 +176,35 @@ cd ~/project; <Ctrl+R> ctrl-t   # 이 폴더에서 실행한 명령 불러오기
 N초 전의 방문은 지금 방문의 `0.5 ^ (N / half_life)`만큼의 가치를 가집니다.
 감쇠는 쿼리 시점에 계산되므로 반감기를 바꾸면 기존 데이터 전체에 즉시 적용됩니다.
 
+## 인라인 제안
+
+입력하는 동안 가장 잘 맞는 과거 명령이 커서 뒤에 회색 텍스트로 표시됩니다. → / End는 전체를,
+Ctrl+F 또는 Alt+→(`forward-word`)는 다음 단어를 수락합니다. 줄의 다른 위치에서는 이 키들이 평소대로
+동작합니다(Ctrl+F는 여전히 한 글자 이동). 히스토리 탐색(↑, `Ctrl+R`) 후에는 다시 입력할 때까지 제안을
+표시하지 않습니다. 프로그램을 찾을 수 없거나 경로 인자가 현재 디렉터리에 없는 후보는 건너뜁니다(삭제하지
+않음) —— venv를 활성화한 뒤처럼 나중에 다시 동작할 수 있기 때문입니다.
+
+## 실패한 명령 잊기
+
+명령이 1-127로 종료되면 shhist가 원인을 확인합니다:
+
+- **프로그램 없음**(`gti status`, 없는 `./build.sh`) —— 해당 명령의 모든 행을 삭제
+- **절대 경로 / `~` 경로 없음**(`cat ~/gone.txt`) —— 모든 행을 삭제
+- **상대 경로 없음**(`sh missing.sh`, `cd nope`) —— 그 디렉터리에서 기록된 행만 삭제
+
+경로 판정은 보수적입니다: 인터프리터의 스크립트(`sh`, `python3`, `node` ... —— `SHHIST_INTERP_CMDS`),
+파일 명령의 모든 인자(`cd`, `cat`, `vim` ... —— `SHHIST_PATH_CMDS`), 그리고 `/`, `~/`, `./`, `../`로
+시작하는 단어입니다. 인자가 패턴, URL 또는 아직 만들어지지 않은 대상인 도구(`git`, `grep`, `mkdir`,
+`cp` ... —— `SHHIST_NOCHECK_CMDS`)는 경로를 검사하지 않습니다. Ctrl+C 등 시그널(종료 코드 >= 128)은
+실패로 치지 않습니다.
+
+예전에 기록된(또는 가져온) 히스토리에는 같은 검사를 일괄 실행할 수 있습니다:
+
+```sh
+shhist-clean -n    # 미리 보기
+shhist-clean       # 삭제
+```
+
 ## 설정
 
 기본값은 `config.zsh`(버전 관리 대상)에 있습니다. 덮어쓸 값은
@@ -196,7 +228,14 @@ export SHHIST_HALFLIFE_DIR=$((14 * 24 * 3600))
 | `SHHIST_BIND_TAB` | `^I` | `j`/`v`/`shf` 줄에서의 Tab 선택기 (`''`이면 비활성화) |
 | `SHHIST_FILE_RUN_KEY` | `ctrl-]` | `Ctrl+R` / `Ctrl+G`의 삽입 + 실행 키 |
 | `SHHIST_DELETE_KEY` | `ctrl-x` | 모든 선택기의 삭제 키 |
-| `SHHIST_SUGGEST_MODE` | `B` | 자동 제안: `A` sqlite / `B` zsh 히스토리 / `AB` sqlite 후 히스토리 |
+| `SHHIST_SUGGEST` | `1` | 내장 인라인 제안(`0`이면 끔) |
+| `SHHIST_SUGGEST_STYLE` | `fg=8` | 제안 텍스트 강조 스타일 |
+| `SHHIST_BIND_ACCEPT_WORD` | `^F` | 제안의 다음 단어 수락(`''`이면 끔) |
+| `SHHIST_SUGGEST_CANDIDATES` | `20` | 조회마다 검사하는 후보 수 |
+| `SHHIST_SUGGEST_ACCEPT_WIDGETS` / `_PARTIAL_WIDGETS` | `forward-char` ... / `forward-word` ... | 전체 / 한 단어를 수락하는 위젯 |
+| `SHHIST_SUGGEST_MODE` | `B` | zsh-autosuggestions가 로드된 경우에만: `A` sqlite / `B` zsh 히스토리 / `AB` 둘 다 |
+| `SHHIST_PRUNE_FAILED` | `1` | 프로그램이나 경로가 없어 실패한 명령 잊기 |
+| `SHHIST_INTERP_CMDS` / `SHHIST_PATH_CMDS` / `SHHIST_NOCHECK_CMDS` | `config.zsh` 참고 | 인자 경로 검사 방식 |
 | `SHHIST_HALFLIFE_DIR` / `_FILE` / `_CMD` | 7 / 3 / 14일 | frecency 반감기(초) |
 | `SHHIST_TRACK_EXIT` | `1` | 종료 코드 기록 |
 | `SHHIST_FZF_LIMIT` | `20000` | `Ctrl+R`에 넘기는 최대 행 수 |
@@ -228,7 +267,7 @@ sqlite3 ~/.config/shhist-data/history.db \
 ~/.config/shhist/uninstall.sh
 ```
 
-설치 디렉터리(`core.zsh`, `widgets.zsh`, `config.zsh`, `config.local.zsh`)와 `~/.zshrc`의 source 줄을
+설치 디렉터리(`core.zsh`, `widgets.zsh`, `suggest.zsh`, `config.zsh`, `config.local.zsh`)와 `~/.zshrc`의 source 줄을
 삭제합니다. 히스토리 데이터베이스는 기본적으로 유지되므로 나중에 재설치하면 그대로 이어집니다.
 `--purge-data`를 주면 데이터베이스도 삭제하고, `-f`를 주면 확인을 건너뜁니다:
 

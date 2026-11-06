@@ -31,18 +31,23 @@ shhist 会记住三样东西：你执行过的**每一条命令**、进入过的
 - **一键执行** —— 在 `Ctrl+R` 和 `Ctrl+G` 中，Enter 只插入，`ctrl-]` 插入**并立即执行**
   （可映射为 Cmd+Enter）。
 - **就地删除** —— 在任意选择器中按 `ctrl-x` 删除高亮的目录、文件或命令，选择器保持打开。
-- **zsh-autosuggestions 数据源** —— 基于 SQLite 中衰减后的频率给出建议。
+- **内置行内建议** —— 来自 SQLite 的灰色提示文字，按衰减后的频率排序，取代 zsh-autosuggestions。
+  程序或文件参数当前不存在的候选会被跳过。
+- **自动忘记失败命令** —— 因程序不存在（`command not found`）或文件/目录参数缺失
+  （`sh missing.sh`、`cd nope`）而失败的命令，会立即从历史中删除。
 - **历史导入** —— 一次性执行 `shhist-import` 导入现有 zsh 历史，保留时间戳。
 
 ## 依赖
 
 - zsh、[fzf](https://github.com/junegunn/fzf) >= 0.45、
   带数学函数的 sqlite3（Homebrew 版本即可）
-- 可选：[zsh-autosuggestions](https://github.com/zsh-users/zsh-autosuggestions)，用于建议数据源
 
 ```sh
-brew install sqlite fzf zsh-autosuggestions
+brew install sqlite fzf
 ```
+
+shhist 自带行内建议，请把 `zsh-autosuggestions` 从 oh-my-zsh 的 `plugins=(...)` 中移除。
+只要它还在加载，shhist 就只为它提供数据（`SHHIST_SUGGEST_MODE`），并在启动时给出提醒。
 
 ## 安装
 
@@ -53,7 +58,7 @@ git clone https://github.com/umindhub/shhist.git ~/.config/shhist
 ~/.config/shhist/install.sh
 ```
 
-shhist 必须在 fzf 快捷键和 zsh-autosuggestions 之后加载；安装脚本会追加到 `.zshrc` 末尾，
+shhist 必须在 fzf 快捷键和其他插件之后加载；安装脚本会追加到 `.zshrc` 末尾，
 通常就满足这一要求。更新只需：
 
 ```sh
@@ -171,6 +176,34 @@ cd ~/project; <Ctrl+R> ctrl-t   # 找回在这个目录执行过的命令
 N 秒前的一次访问，价值等于现在一次访问的 `0.5 ^ (N / half_life)`。
 衰减在查询时计算，因此修改半衰期会立即作用于全部已有数据。
 
+## 行内建议
+
+输入时，最匹配的历史命令会以灰色文字显示在光标之后。→ / End 接受整条，
+Ctrl+F 或 Alt+→（`forward-word`）接受下一个单词；在行内其他位置，这些键保持原功能
+（Ctrl+F 仍然右移一个字符）。浏览历史（↑、`Ctrl+R`）之后不显示建议，直到你再次输入。
+如果候选命令的程序无法解析，或路径参数在当前目录下不存在，它会被跳过（不会被删除）——
+之后它可能又能用了，例如激活 venv 之后。
+
+## 忘记失败的命令
+
+命令以 1-127 退出时，shhist 会检查原因：
+
+- **程序不存在**（`gti status`、不存在的 `./build.sh`）—— 删除该命令的所有记录；
+- **绝对路径 / `~` 路径不存在**（`cat ~/gone.txt`）—— 删除所有记录；
+- **相对路径不存在**（`sh missing.sh`、`cd nope`）—— 只删除在该目录下记录的那些。
+
+路径识别是保守的：解释器的脚本参数（`sh`、`python3`、`node` …… —— `SHHIST_INTERP_CMDS`）、
+文件类命令的所有参数（`cd`、`cat`、`vim` …… —— `SHHIST_PATH_CMDS`），以及以 `/`、`~/`、`./`、`../`
+开头的单词。参数是匹配模式、URL 或尚未创建的目标的工具（`git`、`grep`、`mkdir`、`cp` …… ——
+`SHHIST_NOCHECK_CMDS`）永远不做路径检查。Ctrl+C 等信号（退出码 >= 128）永远不算失败。
+
+对于更早记录的（或导入的）历史，可以批量执行同样的检查：
+
+```sh
+shhist-clean -n    # 预览
+shhist-clean       # 删除
+```
+
 ## 配置
 
 默认值位于 `config.zsh`（纳入版本控制）。把覆盖项写在
@@ -194,7 +227,14 @@ export SHHIST_HALFLIFE_DIR=$((14 * 24 * 3600))
 | `SHHIST_BIND_TAB` | `^I` | `j`/`v`/`shf` 行上的 Tab 选择器（`''` 关闭） |
 | `SHHIST_FILE_RUN_KEY` | `ctrl-]` | `Ctrl+R` / `Ctrl+G` 中的插入并执行键 |
 | `SHHIST_DELETE_KEY` | `ctrl-x` | 所有选择器中的删除键 |
-| `SHHIST_SUGGEST_MODE` | `B` | 自动建议：`A` sqlite / `B` zsh 历史 / `AB` 先 sqlite 后历史 |
+| `SHHIST_SUGGEST` | `1` | 内置行内建议（`0` 关闭） |
+| `SHHIST_SUGGEST_STYLE` | `fg=8` | 建议文字的高亮样式 |
+| `SHHIST_BIND_ACCEPT_WORD` | `^F` | 接受建议的下一个单词（`''` 关闭） |
+| `SHHIST_SUGGEST_CANDIDATES` | `20` | 每次查询检查的候选数 |
+| `SHHIST_SUGGEST_ACCEPT_WIDGETS` / `_PARTIAL_WIDGETS` | `forward-char` … / `forward-word` … | 接受整条 / 一个单词的组件 |
+| `SHHIST_SUGGEST_MODE` | `B` | 仅在 zsh-autosuggestions 仍加载时生效：`A` sqlite / `B` zsh 历史 / `AB` 两者 |
+| `SHHIST_PRUNE_FAILED` | `1` | 忘记因程序或路径缺失而失败的命令 |
+| `SHHIST_INTERP_CMDS` / `SHHIST_PATH_CMDS` / `SHHIST_NOCHECK_CMDS` | 见 `config.zsh` | 参数的路径检查方式 |
 | `SHHIST_HALFLIFE_DIR` / `_FILE` / `_CMD` | 7 / 3 / 14 天 | frecency 半衰期（秒） |
 | `SHHIST_TRACK_EXIT` | `1` | 记录退出码 |
 | `SHHIST_FZF_LIMIT` | `20000` | `Ctrl+R` 最多载入的行数 |
@@ -225,7 +265,7 @@ sqlite3 ~/.config/shhist-data/history.db \
 ~/.config/shhist/uninstall.sh
 ```
 
-会删除安装目录（`core.zsh`、`widgets.zsh`、`config.zsh`、你的 `config.local.zsh`）
+会删除安装目录（`core.zsh`、`widgets.zsh`、`suggest.zsh`、`config.zsh`、你的 `config.local.zsh`）
 以及 `~/.zshrc` 中的 source 行。历史数据库默认保留 —— 以后重装会自动接上。
 加 `--purge-data` 连同数据库一起删除，加 `-f` 跳过确认：
 

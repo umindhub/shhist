@@ -1,7 +1,10 @@
-# shhist - entry point. Add to ~/.zshrc AFTER fzf keybindings and
-# zsh-autosuggestions:
+# shhist - entry point. Add to ~/.zshrc AFTER fzf keybindings and other
+# plugins (oh-my-zsh), so its widgets wrap theirs:
 #
 #   source ~/.config/shhist/widgets.zsh
+#
+# shhist brings its own inline suggestions; drop zsh-autosuggestions from
+# plugins=(...) (see SHHIST_SUGGEST in config.zsh).
 
 [[ -o interactive ]] || return 0
 
@@ -338,32 +341,8 @@ if (( ${SHHIST_ESC_FIX:-1} )); then
 fi
 
 # ---------------------------------------------------------------------------
-# zsh-autosuggestions strategy backed by sqlite
+# Inline suggestions
 # ---------------------------------------------------------------------------
-# Candidates are ranked by decayed occurrence count: every past run of a
-# command contributes 0.5 ^ (age / SHHIST_HALFLIFE_CMD). Multi-line
-# commands are excluded (they render badly as inline suggestions).
-_zsh_autosuggest_strategy_shhist() {
-  emulate -L zsh
-  local prefix="$1"
-  [[ -n "$prefix" ]] || return
-  # Escape LIKE wildcards, then let _shhist_q handle SQL quoting.
-  local like="${prefix//\\/\\\\}"
-  like="${like//\%/\\%}"
-  like="${like//_/\\_}"
-  typeset -g suggestion
-  suggestion="$(_shhist_sql "
-    PRAGMA case_sensitive_like = ON;
-    SELECT cmd FROM commands
-    WHERE cmd LIKE '$(_shhist_q "$like")%' ESCAPE '\'
-      AND instr(cmd, char(10)) = 0
-    GROUP BY cmd
-    ORDER BY SUM(pow(0.5, (strftime('%s','now') - ts) / CAST($SHHIST_HALFLIFE_CMD AS REAL))) DESC
-    LIMIT 1;")"
-}
-
-case "${SHHIST_SUGGEST_MODE:u}" in
-  A)  ZSH_AUTOSUGGEST_STRATEGY=(shhist) ;;
-  AB) ZSH_AUTOSUGGEST_STRATEGY=(shhist history) ;;
-  *)  ZSH_AUTOSUGGEST_STRATEGY=(history) ;;
-esac
+# Loaded last: it wraps forward-char / forward-word & co, and must see any
+# other plugin's versions of them to chain to.
+source "$SHHIST_HOME/suggest.zsh"

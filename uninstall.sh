@@ -13,7 +13,8 @@ set -e
 INSTALL_DIR="${SHHIST_DIR:-$HOME/.config/shhist}"
 ZSHRC="${ZDOTDIR:-$HOME}/.zshrc"
 SOURCE_LINE="source $INSTALL_DIR/widgets.zsh"
-COMMENT_LINE="# shhist -- load AFTER fzf keybindings and zsh-autosuggestions"
+COMMENT_LINE="# shhist -- load AFTER fzf keybindings and other plugins"
+OLD_COMMENT_LINE="# shhist -- load AFTER fzf keybindings and zsh-autosuggestions"
 
 ok()   { print -P "%F{green}✓%f $1" }
 warn() { print -P "%F{yellow}!%f $1" }
@@ -31,7 +32,7 @@ done
 # Pick up the real DB/data-dir paths from the installed config, if present,
 # so this still works after users customize SHHIST_DATA_DIR/SHHIST_DB.
 # Config files only export vars, so sourcing is safe even if shhist was
-# never fully loaded (no fzf/zsh-autosuggestions dependency at this point).
+# never fully loaded (no fzf dependency at this point).
 if [[ -f "$INSTALL_DIR/config.zsh" ]]; then
   SHHIST_HOME="$INSTALL_DIR"
   source "$INSTALL_DIR/config.zsh" 2>/dev/null || true
@@ -70,7 +71,7 @@ if [[ -f "$ZSHRC" ]] && grep -qF "$SOURCE_LINE" "$ZSHRC"; then
   # Drop the source line and the comment line install.sh added above it;
   # a leftover blank line is harmless and left in place.
   tmp="${ZSHRC}.shhist-uninstall.tmp"
-  grep -vF "$SOURCE_LINE" "$ZSHRC" | grep -vF "$COMMENT_LINE" > "$tmp"
+  grep -vF "$SOURCE_LINE" "$ZSHRC" | grep -vF "$COMMENT_LINE" | grep -vF "$OLD_COMMENT_LINE" > "$tmp"
   mv "$tmp" "$ZSHRC"
   ok "removed source line from $ZSHRC"
 else

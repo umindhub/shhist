@@ -32,18 +32,24 @@ shhist は 3 つのものを記憶します：実行した**すべてのコマ�
   （Cmd+Enter に割り当て可能）。
 - **その場で削除** —— どのピッカーでも `ctrl-x` でハイライト中のディレクトリ・ファイル・コマンドを削除。
   ピッカーは開いたままです。
-- **zsh-autosuggestions のソース** —— SQLite 上の減衰済み頻度でサジェストを順位付け。
+- **組み込みインラインサジェスト** —— SQLite の減衰済み頻度で順位付けしたグレーのゴーストテキスト。
+  zsh-autosuggestions を置き換えます。プログラムやファイル引数が今存在しない候補はスキップ。
+- **失敗したコマンドを忘れる** —— プログラムが存在しない（`command not found`）、またはファイル/
+  ディレクトリ引数がない（`sh missing.sh`、`cd nope`）ために失敗したコマンドは即座に履歴から削除。
 - **履歴のインポート** —— `shhist-import` で既存の zsh 履歴を一括取り込み（タイムスタンプ保持）。
 
 ## 必要環境
 
 - zsh、[fzf](https://github.com/junegunn/fzf) >= 0.45、
   数学関数付きでビルドされた sqlite3（Homebrew 版で OK）
-- 任意：サジェストのソースとして [zsh-autosuggestions](https://github.com/zsh-users/zsh-autosuggestions)
 
 ```sh
-brew install sqlite fzf zsh-autosuggestions
+brew install sqlite fzf
 ```
+
+shhist は独自のインラインサジェストを持つため、oh-my-zsh の `plugins=(...)` から
+`zsh-autosuggestions` を外してください。読み込まれている間は、shhist はそのデータ供給のみを行い
+（`SHHIST_SUGGEST_MODE`）、起動時にリマインダーを表示します。
 
 ## インストール
 
@@ -54,7 +60,7 @@ git clone https://github.com/umindhub/shhist.git ~/.config/shhist
 ~/.config/shhist/install.sh
 ```
 
-shhist は fzf のキーバインドと zsh-autosuggestions の後に読み込む必要があります。
+shhist は fzf のキーバインドと他のプラグインの後に読み込む必要があります。
 インストーラは `.zshrc` の末尾に追記するので、通常はこれで条件を満たします。更新は次のとおり：
 
 ```sh
@@ -175,6 +181,35 @@ cd ~/project; <Ctrl+R> ctrl-t   # このフォルダで実行したコマンド�
 N 秒前の訪問は、現在の訪問の `0.5 ^ (N / half_life)` 倍の価値を持ちます。
 減衰はクエリ時に計算されるため、半減期を変更すると既存データ全体に即座に反映されます。
 
+## インラインサジェスト
+
+入力中、最も一致する過去のコマンドがカーソルの後ろにグレーで表示されます。→ / End で全体を、
+Ctrl+F または Alt+→（`forward-word`）で次の単語を確定します。行の他の位置では、これらのキーは
+通常どおり動作します（Ctrl+F は 1 文字右へ移動）。履歴移動（↑、`Ctrl+R`）の後は、再び入力するまで
+サジェストを表示しません。プログラムが解決できない、またはパス引数が現在のディレクトリに存在しない
+候補はスキップされます（削除はしません）—— venv を有効にした後などに再び使えるかもしれないためです。
+
+## 失敗したコマンドを忘れる
+
+コマンドが 1〜127 で終了すると、shhist は原因を確認します：
+
+- **プログラムが見つからない**（`gti status`、存在しない `./build.sh`）—— そのコマンドの全レコードを削除
+- **絶対パス / `~` パスが存在しない**（`cat ~/gone.txt`）—— 全レコードを削除
+- **相対パスが存在しない**（`sh missing.sh`、`cd nope`）—— そのディレクトリで記録された分のみ削除
+
+パスの判定は保守的です：インタプリタのスクリプト（`sh`、`python3`、`node` … —— `SHHIST_INTERP_CMDS`）、
+ファイル系コマンドの全引数（`cd`、`cat`、`vim` … —— `SHHIST_PATH_CMDS`）、そして `/`、`~/`、`./`、`../`
+で始まる単語です。引数がパターン、URL、まだ作成されていないターゲットであるツール（`git`、`grep`、
+`mkdir`、`cp` … —— `SHHIST_NOCHECK_CMDS`）はパスを一切チェックしません。Ctrl+C などのシグナル
+（終了コード >= 128）は失敗として扱いません。
+
+以前に記録された（またはインポートした）履歴には、同じチェックを一括で実行できます：
+
+```sh
+shhist-clean -n    # プレビュー
+shhist-clean       # 削除
+```
+
 ## 設定
 
 デフォルト値は `config.zsh`（バージョン管理対象）にあります。上書き設定は
@@ -198,7 +233,14 @@ export SHHIST_HALFLIFE_DIR=$((14 * 24 * 3600))
 | `SHHIST_BIND_TAB` | `^I` | `j`/`v`/`shf` 行での Tab ピッカー（`''` で無効） |
 | `SHHIST_FILE_RUN_KEY` | `ctrl-]` | `Ctrl+R` / `Ctrl+G` での挿入 + 実行キー |
 | `SHHIST_DELETE_KEY` | `ctrl-x` | 全ピッカー共通の削除キー |
-| `SHHIST_SUGGEST_MODE` | `B` | 自動サジェスト：`A` sqlite / `B` zsh 履歴 / `AB` sqlite → 履歴 |
+| `SHHIST_SUGGEST` | `1` | 組み込みインラインサジェスト（`0` で無効） |
+| `SHHIST_SUGGEST_STYLE` | `fg=8` | サジェスト文字のハイライト |
+| `SHHIST_BIND_ACCEPT_WORD` | `^F` | サジェストの次の単語を確定（`''` で無効） |
+| `SHHIST_SUGGEST_CANDIDATES` | `20` | 1 回の検索でチェックする候補数 |
+| `SHHIST_SUGGEST_ACCEPT_WIDGETS` / `_PARTIAL_WIDGETS` | `forward-char` … / `forward-word` … | 全体 / 1 単語を確定するウィジェット |
+| `SHHIST_SUGGEST_MODE` | `B` | zsh-autosuggestions 読み込み時のみ：`A` sqlite / `B` zsh 履歴 / `AB` 両方 |
+| `SHHIST_PRUNE_FAILED` | `1` | プログラムやパスがなくて失敗したコマンドを忘れる |
+| `SHHIST_INTERP_CMDS` / `SHHIST_PATH_CMDS` / `SHHIST_NOCHECK_CMDS` | `config.zsh` 参照 | 引数のパスチェック方法 |
 | `SHHIST_HALFLIFE_DIR` / `_FILE` / `_CMD` | 7 / 3 / 14 日 | frecency の半減期（秒） |
 | `SHHIST_TRACK_EXIT` | `1` | 終了コードを記録 |
 | `SHHIST_FZF_LIMIT` | `20000` | `Ctrl+R` に渡す最大行数 |
@@ -230,7 +272,7 @@ sqlite3 ~/.config/shhist-data/history.db \
 ~/.config/shhist/uninstall.sh
 ```
 
-インストールディレクトリ（`core.zsh`、`widgets.zsh`、`config.zsh`、`config.local.zsh`）と
+インストールディレクトリ（`core.zsh`、`widgets.zsh`、`suggest.zsh`、`config.zsh`、`config.local.zsh`）と
 `~/.zshrc` の source 行を削除します。履歴データベースはデフォルトで残るため、再インストールすれば
 そのまま引き継がれます。`--purge-data` でデータベースも削除、`-f` で確認を省略します：
 

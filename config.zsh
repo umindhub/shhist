@@ -64,12 +64,56 @@ export SHHIST_FILE_RUN_KEY="${SHHIST_FILE_RUN_KEY:-ctrl-]}"
 export SHHIST_DELETE_KEY="${SHHIST_DELETE_KEY:-ctrl-x}"
 
 # ---------------------------------------------------------------------------
-# Autosuggestions source (zsh-autosuggestions)
+# Inline suggestions (replaces zsh-autosuggestions)
 # ---------------------------------------------------------------------------
+# Gray "ghost text" completing the line from the sqlite history, ranked by
+# decayed run count (SHHIST_HALFLIFE_CMD). Right arrow / End accepts it all,
+# Alt+Right (forward-word) accepts the next word. A candidate whose program
+# or file operands are missing right now is skipped.
+# Remove zsh-autosuggestions from oh-my-zsh plugins=(...) to use this; while
+# that plugin is still loaded, shhist only feeds it (SHHIST_SUGGEST_MODE
+# below) and prints a reminder. 0 = no built-in suggestions, no reminder.
+export SHHIST_SUGGEST=1
+# zle highlight spec for the ghost text (e.g. 'fg=8', 'fg=#666666').
+export SHHIST_SUGGEST_STYLE="${SHHIST_SUGGEST_STYLE:-fg=8}"
+# Key that accepts the suggestion one word at a time (same as Alt+Right).
+# Ctrl+F is normally forward-char, which does nothing at the end of the
+# line -- exactly where a suggestion shows -- so anywhere else in the line
+# it still moves one character. Right arrow keeps accepting everything.
+# '' = leave the key alone.
+export SHHIST_BIND_ACCEPT_WORD="${SHHIST_BIND_ACCEPT_WORD-^F}"
+# Top-ranked candidates checked per lookup; the first sound one is shown.
+export SHHIST_SUGGEST_CANDIDATES=20
+# Widgets that accept the whole suggestion / up to the next word when the
+# cursor is at the end of the line (otherwise they behave as usual).
+typeset -ga SHHIST_SUGGEST_ACCEPT_WIDGETS=(forward-char end-of-line vi-forward-char vi-end-of-line)
+typeset -ga SHHIST_SUGGEST_PARTIAL_WIDGETS=(forward-word emacs-forward-word vi-forward-word
+  vi-forward-word-end vi-forward-blank-word vi-forward-blank-word-end)
+
+# Legacy: source used when zsh-autosuggestions is still loaded.
 #   A  = sqlite only
 #   B  = zsh default history only (default)
 #   AB = sqlite first, fall back to default history
 export SHHIST_SUGGEST_MODE="${SHHIST_SUGGEST_MODE:-B}"
+
+# ---------------------------------------------------------------------------
+# Forget broken commands
+# ---------------------------------------------------------------------------
+# When a command fails (exit 1-127), drop it from history if the reason is
+# visible: its program doesn't exist (`gti status` -> command not found), or
+# a file/directory operand doesn't (`sh missing.sh`, `cd nope`, `cat ./x`).
+# A missing program or absolute path removes every row of that command; a
+# missing relative path only the rows recorded in that same directory.
+# Older history: `shhist-clean -n` previews, `shhist-clean` removes.
+export SHHIST_PRUNE_FAILED=1
+# Interpreters: the first operand (with no option before it) is a script.
+typeset -ga SHHIST_INTERP_CMDS=(sh bash zsh dash ksh fish source . python python2 python3
+  node deno bun ruby perl php lua osascript swift)
+# Every operand is a path.
+typeset -ga SHHIST_PATH_CMDS=(cd pushd ls cat less more head tail bat vim vi nvim nano code rmdir)
+# Operands are patterns, URLs, or targets that don't exist yet: never checked.
+typeset -ga SHHIST_NOCHECK_CMDS=(git curl wget ssh scp rsync open echo printf print tee
+  grep egrep fgrep rg ag sed awk find jq mkdir touch cp mv ln tar zip unzip ditto install mktemp)
 
 # ---------------------------------------------------------------------------
 # Misc

@@ -39,8 +39,12 @@ anywhere    $ vim <Ctrl+G>     # pick any frecent file, its path is inserted
   `ctrl-]` inserts **and runs** in one stroke (can be mapped to Cmd+Enter).
 - **Delete in place** -- `ctrl-x` inside any picker removes the highlighted
   directory, file, or command and keeps the picker open.
-- **zsh-autosuggestions source** -- suggestions ranked by decayed frequency
-  from SQLite.
+- **Built-in inline suggestions** -- gray ghost text from SQLite, ranked by
+  decayed frequency; replaces zsh-autosuggestions. Candidates whose program
+  or file operands are missing right now are skipped.
+- **Forgets broken commands** -- a command that fails because its program
+  doesn't exist (`command not found`) or a file/directory operand is missing
+  (`sh missing.sh`, `cd nope`) is removed from history right away.
 - **History import** -- one-shot `shhist-import` of your existing zsh
   history, timestamps preserved.
 
@@ -48,12 +52,13 @@ anywhere    $ vim <Ctrl+G>     # pick any frecent file, its path is inserted
 
 - zsh, [fzf](https://github.com/junegunn/fzf) >= 0.45,
   sqlite3 built with math functions (Homebrew's is)
-- optional: [zsh-autosuggestions](https://github.com/zsh-users/zsh-autosuggestions)
-  for the suggestion source
-
 ```sh
-brew install sqlite fzf zsh-autosuggestions
+brew install sqlite fzf
 ```
+
+shhist has its own inline suggestions, so remove `zsh-autosuggestions` from
+oh-my-zsh `plugins=(...)`. While it is still loaded, shhist only feeds it
+(`SHHIST_SUGGEST_MODE`) and prints a reminder at startup.
 
 ## Install
 
@@ -65,7 +70,7 @@ git clone https://github.com/umindhub/shhist.git ~/.config/shhist
 ~/.config/shhist/install.sh
 ```
 
-shhist must load after fzf keybindings and zsh-autosuggestions; the
+shhist must load after fzf keybindings and other plugins; the
 installer appends to the end of `.zshrc`, which normally satisfies that.
 Updating is just:
 
@@ -195,6 +200,42 @@ A visit N seconds ago is worth `0.5 ^ (N / half_life)` of a visit now.
 Decay is computed at query time, so changing a half-life applies to all
 existing data instantly.
 
+## Inline suggestions
+
+As you type, the best matching past command appears as gray text after the
+cursor. Right arrow / End accepts all of it, Ctrl+F or Alt+Right
+(`forward-word`) accepts the next word; elsewhere in the line these keys
+work as usual (Ctrl+F still moves one character).
+History navigation (Up, `Ctrl+R`) shows no suggestion until you type again.
+A candidate is skipped (not deleted) when its program can't be resolved or
+a path operand is missing in the current directory -- it may work again
+later, e.g. after activating a venv.
+
+## Forgetting broken commands
+
+When a command exits with 1-127, shhist checks why:
+
+- **program not found** (`gti status`, a missing `./build.sh`) -- every row
+  of that command is deleted;
+- **missing absolute / `~` path** (`cat ~/gone.txt`) -- every row is deleted;
+- **missing relative path** (`sh missing.sh`, `cd nope`) -- only the rows
+  recorded in that directory are deleted.
+
+Paths are recognized conservatively: the script of an interpreter (`sh`,
+`python3`, `node`, ... -- `SHHIST_INTERP_CMDS`), every operand of a file
+command (`cd`, `cat`, `vim`, ... -- `SHHIST_PATH_CMDS`), and words starting
+with `/`, `~/`, `./`, `../`. Tools whose operands are patterns, URLs or
+not-yet-created targets (`git`, `grep`, `mkdir`, `cp`, ... --
+`SHHIST_NOCHECK_CMDS`) are never path-checked. Ctrl+C and other signals
+(exit >= 128) never count as failures.
+
+For history recorded earlier (or imported), run the same check in bulk:
+
+```sh
+shhist-clean -n    # preview
+shhist-clean       # remove
+```
+
 ## Configuration
 
 Defaults live in `config.zsh` (tracked). Put your overrides in
@@ -219,7 +260,14 @@ export SHHIST_HALFLIFE_DIR=$((14 * 24 * 3600))
 | `SHHIST_BIND_TAB` | `^I` | Tab picker on `j`/`v`/`shf` lines (`''` disables) |
 | `SHHIST_FILE_RUN_KEY` | `ctrl-]` | insert + run key in `Ctrl+R` / `Ctrl+G` |
 | `SHHIST_DELETE_KEY` | `ctrl-x` | delete key in all pickers |
-| `SHHIST_SUGGEST_MODE` | `B` | autosuggestions: `A` sqlite / `B` zsh history / `AB` sqlite then history |
+| `SHHIST_SUGGEST` | `1` | built-in inline suggestions (`0` disables) |
+| `SHHIST_SUGGEST_STYLE` | `fg=8` | highlight of the suggestion text |
+| `SHHIST_BIND_ACCEPT_WORD` | `^F` | accept the next word of the suggestion (`''` disables) |
+| `SHHIST_SUGGEST_CANDIDATES` | `20` | top candidates checked per lookup |
+| `SHHIST_SUGGEST_ACCEPT_WIDGETS` / `_PARTIAL_WIDGETS` | `forward-char` ... / `forward-word` ... | widgets accepting all / one word |
+| `SHHIST_SUGGEST_MODE` | `B` | only while zsh-autosuggestions is loaded: `A` sqlite / `B` zsh history / `AB` both |
+| `SHHIST_PRUNE_FAILED` | `1` | forget failed commands with a missing program or path |
+| `SHHIST_INTERP_CMDS` / `SHHIST_PATH_CMDS` / `SHHIST_NOCHECK_CMDS` | see `config.zsh` | how operands are path-checked |
 | `SHHIST_HALFLIFE_DIR` / `_FILE` / `_CMD` | 7 / 3 / 14 days | frecency half-lives (seconds) |
 | `SHHIST_TRACK_EXIT` | `1` | record exit codes |
 | `SHHIST_FZF_LIMIT` | `20000` | max rows fed to `Ctrl+R` |
@@ -253,7 +301,7 @@ sqlite3 ~/.config/shhist-data/history.db \
 ~/.config/shhist/uninstall.sh
 ```
 
-Removes the install directory (`core.zsh`, `widgets.zsh`, `config.zsh`,
+Removes the install directory (`core.zsh`, `widgets.zsh`, `suggest.zsh`, `config.zsh`,
 your `config.local.zsh`) and the source line in `~/.zshrc`. Your history
 database is kept by default -- reinstalling later picks it right back up.
 Pass `--purge-data` to delete it too, or `-f` to skip the confirmation

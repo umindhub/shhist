@@ -39,8 +39,12 @@ donde sea   $ vim <Ctrl+G>     # elige un archivo frecuente y se inserta su ruta
   `ctrl-]` inserta **y ejecuta** de una vez (se puede asignar a Cmd+Enter).
 - **Borrado en el sitio**: `ctrl-x` dentro de cualquier selector elimina el
   directorio, archivo o comando resaltado y deja el selector abierto.
-- **Fuente para zsh-autosuggestions**: sugerencias ordenadas por frecuencia
-  decaída desde SQLite.
+- **Sugerencias en línea integradas**: texto fantasma gris desde SQLite,
+  ordenado por frecuencia decaída; sustituye a zsh-autosuggestions. Se omiten
+  los candidatos cuyo programa u operandos de archivo no existen ahora mismo.
+- **Olvida comandos rotos**: un comando que falla porque su programa no
+  existe (`command not found`) o falta un operando de archivo/directorio
+  (`sh missing.sh`, `cd nope`) se elimina del historial al instante.
 - **Importación del historial**: `shhist-import` importa una sola vez tu
   historial de zsh existente, conservando las marcas de tiempo.
 
@@ -48,12 +52,14 @@ donde sea   $ vim <Ctrl+G>     # elige un archivo frecuente y se inserta su ruta
 
 - zsh, [fzf](https://github.com/junegunn/fzf) >= 0.45,
   sqlite3 compilado con funciones matemáticas (el de Homebrew lo está)
-- opcional: [zsh-autosuggestions](https://github.com/zsh-users/zsh-autosuggestions)
-  para la fuente de sugerencias
 
 ```sh
-brew install sqlite fzf zsh-autosuggestions
+brew install sqlite fzf
 ```
+
+shhist trae sus propias sugerencias en línea, así que quita `zsh-autosuggestions`
+de `plugins=(...)` de oh-my-zsh. Mientras siga cargado, shhist solo le
+proporciona datos (`SHHIST_SUGGEST_MODE`) y muestra un aviso al iniciar.
 
 ## Instalación
 
@@ -65,7 +71,7 @@ git clone https://github.com/umindhub/shhist.git ~/.config/shhist
 ~/.config/shhist/install.sh
 ```
 
-shhist debe cargarse después de los atajos de fzf y de zsh-autosuggestions; el
+shhist debe cargarse después de los atajos de fzf y de los demás plugins; el
 instalador añade la línea al final de `.zshrc`, lo que normalmente lo cumple.
 Para actualizar basta con:
 
@@ -198,6 +204,45 @@ Una visita de hace N segundos vale `0.5 ^ (N / half_life)` de una visita ahora.
 El decaimiento se calcula al consultar, así que cambiar una vida media se aplica
 al instante a todos los datos existentes.
 
+## Sugerencias en línea
+
+Mientras escribes, el comando anterior que mejor coincide aparece en gris
+detrás del cursor. Flecha derecha / Fin lo acepta entero, Ctrl+F o
+Alt+Derecha (`forward-word`) acepta la siguiente palabra; en otras posiciones
+de la línea estas teclas funcionan como siempre (Ctrl+F sigue avanzando un
+carácter). Tras navegar por el historial (Arriba, `Ctrl+R`) no se muestra
+ninguna sugerencia hasta que vuelvas a escribir. Un candidato se omite (no se
+borra) si su programa no se puede resolver o falta un operando de ruta en el
+directorio actual: puede volver a funcionar más tarde, por ejemplo tras activar
+un venv.
+
+## Olvidar comandos rotos
+
+Cuando un comando termina con 1-127, shhist comprueba por qué:
+
+- **programa no encontrado** (`gti status`, un `./build.sh` inexistente):
+  se borran todas las filas de ese comando;
+- **ruta absoluta / `~` inexistente** (`cat ~/gone.txt`): se borran todas
+  las filas;
+- **ruta relativa inexistente** (`sh missing.sh`, `cd nope`): solo se borran
+  las filas registradas en ese directorio.
+
+Las rutas se reconocen de forma conservadora: el script de un intérprete
+(`sh`, `python3`, `node`, ...: `SHHIST_INTERP_CMDS`), todos los operandos de
+un comando de archivos (`cd`, `cat`, `vim`, ...: `SHHIST_PATH_CMDS`) y las
+palabras que empiezan por `/`, `~/`, `./`, `../`. Las herramientas cuyos
+operandos son patrones, URL o destinos aún no creados (`git`, `grep`, `mkdir`,
+`cp`, ...: `SHHIST_NOCHECK_CMDS`) nunca se comprueban. Ctrl+C y otras señales
+(salida >= 128) nunca cuentan como fallo.
+
+Para el historial registrado antes (o importado), ejecuta la misma
+comprobación en bloque:
+
+```sh
+shhist-clean -n    # vista previa
+shhist-clean       # eliminar
+```
+
 ## Configuración
 
 Los valores por defecto están en `config.zsh` (versionado). Pon tus ajustes en
@@ -222,7 +267,14 @@ export SHHIST_HALFLIFE_DIR=$((14 * 24 * 3600))
 | `SHHIST_BIND_TAB` | `^I` | selector con Tab en líneas `j`/`v`/`shf` (`''` lo desactiva) |
 | `SHHIST_FILE_RUN_KEY` | `ctrl-]` | tecla insertar + ejecutar en `Ctrl+R` / `Ctrl+G` |
 | `SHHIST_DELETE_KEY` | `ctrl-x` | tecla de borrado en todos los selectores |
-| `SHHIST_SUGGEST_MODE` | `B` | autosugerencias: `A` sqlite / `B` historial de zsh / `AB` primero sqlite, luego historial |
+| `SHHIST_SUGGEST` | `1` | sugerencias en línea integradas (`0` las desactiva) |
+| `SHHIST_SUGGEST_STYLE` | `fg=8` | resaltado del texto sugerido |
+| `SHHIST_BIND_ACCEPT_WORD` | `^F` | aceptar la siguiente palabra de la sugerencia (`''` lo desactiva) |
+| `SHHIST_SUGGEST_CANDIDATES` | `20` | candidatos principales comprobados por consulta |
+| `SHHIST_SUGGEST_ACCEPT_WIDGETS` / `_PARTIAL_WIDGETS` | `forward-char` ... / `forward-word` ... | widgets que aceptan todo / una palabra |
+| `SHHIST_SUGGEST_MODE` | `B` | solo mientras zsh-autosuggestions está cargado: `A` sqlite / `B` historial de zsh / `AB` ambos |
+| `SHHIST_PRUNE_FAILED` | `1` | olvidar comandos fallidos por programa o ruta inexistente |
+| `SHHIST_INTERP_CMDS` / `SHHIST_PATH_CMDS` / `SHHIST_NOCHECK_CMDS` | ver `config.zsh` | cómo se comprueban las rutas de los operandos |
 | `SHHIST_HALFLIFE_DIR` / `_FILE` / `_CMD` | 7 / 3 / 14 días | vidas medias de frecency (segundos) |
 | `SHHIST_TRACK_EXIT` | `1` | registrar códigos de salida |
 | `SHHIST_FZF_LIMIT` | `20000` | máximo de filas para `Ctrl+R` |
@@ -256,7 +308,7 @@ sqlite3 ~/.config/shhist-data/history.db \
 ~/.config/shhist/uninstall.sh
 ```
 
-Elimina el directorio de instalación (`core.zsh`, `widgets.zsh`, `config.zsh`,
+Elimina el directorio de instalación (`core.zsh`, `widgets.zsh`, `suggest.zsh`, `config.zsh`,
 tu `config.local.zsh`) y la línea source de `~/.zshrc`. La base de datos del
 historial se conserva por defecto: al reinstalar se recupera tal cual. Usa
 `--purge-data` para borrarla también, o `-f` para omitir la confirmación:

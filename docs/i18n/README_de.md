@@ -39,8 +39,12 @@ Befehl einfügen -- ohne den Pfad erneut zu tippen.
   `ctrl-]` fügt ein **und führt aus** (auf Cmd+Enter abbildbar).
 - **Löschen an Ort und Stelle** -- `ctrl-x` in jeder Auswahlliste entfernt das
   markierte Verzeichnis, die Datei oder den Befehl; die Liste bleibt offen.
-- **Quelle für zsh-autosuggestions** -- Vorschläge nach zerfallener Häufigkeit
-  aus SQLite gereiht.
+- **Eingebaute Inline-Vorschläge** -- graue Geistertext-Vorschläge aus SQLite,
+  nach zerfallener Häufigkeit gereiht; ersetzt zsh-autosuggestions. Kandidaten,
+  deren Programm oder Datei-Operanden gerade fehlen, werden übersprungen.
+- **Vergisst kaputte Befehle** -- ein Befehl, der scheitert, weil sein Programm
+  nicht existiert (`command not found`) oder ein Datei-/Verzeichnis-Operand
+  fehlt (`sh missing.sh`, `cd nope`), wird sofort aus dem Verlauf entfernt.
 - **Verlaufsimport** -- einmaliges `shhist-import` deines bestehenden
   zsh-Verlaufs, Zeitstempel bleiben erhalten.
 
@@ -48,12 +52,14 @@ Befehl einfügen -- ohne den Pfad erneut zu tippen.
 
 - zsh, [fzf](https://github.com/junegunn/fzf) >= 0.45,
   sqlite3 mit Mathematikfunktionen (die Homebrew-Version hat sie)
-- optional: [zsh-autosuggestions](https://github.com/zsh-users/zsh-autosuggestions)
-  für die Vorschlagsquelle
 
 ```sh
-brew install sqlite fzf zsh-autosuggestions
+brew install sqlite fzf
 ```
+
+shhist bringt eigene Inline-Vorschläge mit, entferne daher `zsh-autosuggestions`
+aus `plugins=(...)` von oh-my-zsh. Solange es noch geladen ist, liefert shhist
+ihm nur Daten (`SHHIST_SUGGEST_MODE`) und zeigt beim Start einen Hinweis.
 
 ## Installation
 
@@ -65,7 +71,7 @@ git clone https://github.com/umindhub/shhist.git ~/.config/shhist
 ~/.config/shhist/install.sh
 ```
 
-shhist muss nach den fzf-Tastenbelegungen und zsh-autosuggestions geladen werden;
+shhist muss nach den fzf-Tastenbelegungen und anderen Plugins geladen werden;
 das Skript hängt an das Ende der `.zshrc` an, was das normalerweise erfüllt.
 Aktualisieren ist nur:
 
@@ -199,6 +205,44 @@ Ein Besuch vor N Sekunden zählt `0.5 ^ (N / half_life)` eines Besuchs jetzt.
 Der Verfall wird bei der Abfrage berechnet, eine geänderte Halbwertszeit wirkt
 also sofort auf alle vorhandenen Daten.
 
+## Inline-Vorschläge
+
+Beim Tippen erscheint der am besten passende frühere Befehl als grauer Text
+hinter dem Cursor. Pfeil rechts / Ende übernimmt alles, Ctrl+F oder Alt+Rechts
+(`forward-word`) das nächste Wort; an anderen Stellen der Zeile verhalten sich
+diese Tasten wie gewohnt (Ctrl+F bewegt weiterhin um ein Zeichen). Nach dem
+Blättern im Verlauf (Hoch, `Ctrl+R`) erscheint kein Vorschlag, bis du wieder
+tippst. Ein Kandidat wird übersprungen (nicht gelöscht), wenn sein Programm
+nicht auflösbar ist oder ein Pfad-Operand im aktuellen Verzeichnis fehlt -- er
+kann später wieder funktionieren, z. B. nach dem Aktivieren einer venv.
+
+## Kaputte Befehle vergessen
+
+Endet ein Befehl mit 1-127, prüft shhist den Grund:
+
+- **Programm nicht gefunden** (`gti status`, ein fehlendes `./build.sh`) --
+  alle Zeilen dieses Befehls werden gelöscht;
+- **fehlender absoluter / `~`-Pfad** (`cat ~/gone.txt`) -- alle Zeilen werden
+  gelöscht;
+- **fehlender relativer Pfad** (`sh missing.sh`, `cd nope`) -- nur die in
+  diesem Verzeichnis aufgezeichneten Zeilen werden gelöscht.
+
+Pfade werden zurückhaltend erkannt: das Skript eines Interpreters (`sh`,
+`python3`, `node`, ... -- `SHHIST_INTERP_CMDS`), jeder Operand eines
+Dateibefehls (`cd`, `cat`, `vim`, ... -- `SHHIST_PATH_CMDS`) und Wörter, die
+mit `/`, `~/`, `./`, `../` beginnen. Werkzeuge, deren Operanden Muster, URLs
+oder noch nicht angelegte Ziele sind (`git`, `grep`, `mkdir`, `cp`, ... --
+`SHHIST_NOCHECK_CMDS`), werden nie auf Pfade geprüft. Ctrl+C und andere
+Signale (Exit >= 128) zählen nie als Fehlschlag.
+
+Für früher aufgezeichneten (oder importierten) Verlauf lässt sich dieselbe
+Prüfung gesammelt ausführen:
+
+```sh
+shhist-clean -n    # Vorschau
+shhist-clean       # entfernen
+```
+
 ## Konfiguration
 
 Die Standardwerte stehen in `config.zsh` (versioniert). Eigene Anpassungen
@@ -223,7 +267,14 @@ export SHHIST_HALFLIFE_DIR=$((14 * 24 * 3600))
 | `SHHIST_BIND_TAB` | `^I` | Tab-Auswahl auf `j`/`v`/`shf`-Zeilen (`''` deaktiviert) |
 | `SHHIST_FILE_RUN_KEY` | `ctrl-]` | Einfügen-+-Ausführen-Taste in `Ctrl+R` / `Ctrl+G` |
 | `SHHIST_DELETE_KEY` | `ctrl-x` | Löschtaste in allen Auswahllisten |
-| `SHHIST_SUGGEST_MODE` | `B` | Autosuggestions: `A` sqlite / `B` zsh-Verlauf / `AB` erst sqlite, dann Verlauf |
+| `SHHIST_SUGGEST` | `1` | eingebaute Inline-Vorschläge (`0` schaltet ab) |
+| `SHHIST_SUGGEST_STYLE` | `fg=8` | Hervorhebung des Vorschlagstexts |
+| `SHHIST_BIND_ACCEPT_WORD` | `^F` | nächstes Wort des Vorschlags übernehmen (`''` schaltet ab) |
+| `SHHIST_SUGGEST_CANDIDATES` | `20` | pro Abfrage geprüfte Top-Kandidaten |
+| `SHHIST_SUGGEST_ACCEPT_WIDGETS` / `_PARTIAL_WIDGETS` | `forward-char` ... / `forward-word` ... | Widgets, die alles / ein Wort übernehmen |
+| `SHHIST_SUGGEST_MODE` | `B` | nur solange zsh-autosuggestions geladen ist: `A` sqlite / `B` zsh-Verlauf / `AB` beides |
+| `SHHIST_PRUNE_FAILED` | `1` | gescheiterte Befehle mit fehlendem Programm oder Pfad vergessen |
+| `SHHIST_INTERP_CMDS` / `SHHIST_PATH_CMDS` / `SHHIST_NOCHECK_CMDS` | siehe `config.zsh` | wie Operanden auf Pfade geprüft werden |
 | `SHHIST_HALFLIFE_DIR` / `_FILE` / `_CMD` | 7 / 3 / 14 Tage | Frecency-Halbwertszeiten (Sekunden) |
 | `SHHIST_TRACK_EXIT` | `1` | Exit-Codes aufzeichnen |
 | `SHHIST_FZF_LIMIT` | `20000` | max. Zeilen für `Ctrl+R` |
@@ -257,7 +308,7 @@ sqlite3 ~/.config/shhist-data/history.db \
 ~/.config/shhist/uninstall.sh
 ```
 
-Entfernt das Installationsverzeichnis (`core.zsh`, `widgets.zsh`, `config.zsh`,
+Entfernt das Installationsverzeichnis (`core.zsh`, `widgets.zsh`, `suggest.zsh`, `config.zsh`,
 deine `config.local.zsh`) und die source-Zeile in `~/.zshrc`. Die
 Verlaufsdatenbank bleibt standardmäßig erhalten -- eine spätere Neuinstallation
 übernimmt sie direkt. `--purge-data` löscht sie ebenfalls, `-f` überspringt die
