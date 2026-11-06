@@ -18,14 +18,41 @@ export SHHIST_DB="${SHHIST_DB:-$SHHIST_DATA_DIR/history.db}"
 export SHHIST_SQLITE="${SHHIST_SQLITE:-}"
 
 # ---------------------------------------------------------------------------
-# Frecency decay (fully customizable, per kind)
+# Ranking (suggestions, Ctrl+R, j, v / shf, Ctrl+G)
 # ---------------------------------------------------------------------------
-# Exponential half-life in SECONDS. A visit N seconds ago is worth
-# 0.5 ^ (N / half_life) of a visit right now. Smaller = faster decay,
-# i.e. recent items dominate more.
-export SHHIST_HALFLIFE_DIR=$((7 * 24 * 3600))    # directory jump: 7 days
-export SHHIST_HALFLIFE_FILE=$((3 * 24 * 3600))   # file ranking:   3 days
-export SHHIST_HALFLIFE_CMD=$((14 * 24 * 3600))   # suggestions:    14 days (long-term habit)
+# Every visit / run is worth 0.5 ^ (age / half_life) of one right now.
+# Each kind keeps two sums: S_short (recent work) and S_long (habit).
+# Algorithms -- compare them on your own data with shhist-rank first:
+#   shhist-rank -a single git          suggestions / Ctrl+R for "git..."
+#   shhist-rank -k dir -a seg proj     what `j proj` would pick
+#
+#   duallog  W*S_short + log2(1 + S_long)   recent work counts fully, habit
+#            only logarithmically -> new items can rise (default)
+#   dual     W*S_short + S_long             both linear
+#   single   S_long                         one half-life (old behavior)
+#   seg      runs * weight of the newest visit's age bucket (SHHIST_RANK_SEGS)
+#   recent   newest first (old Ctrl+R / zsh-autosuggestions behavior)
+export SHHIST_RANK="${SHHIST_RANK:-duallog}"
+# Per-feature override; '' = use SHHIST_RANK.
+export SHHIST_SUGGEST_RANK="${SHHIST_SUGGEST_RANK:-}"   # inline suggestions
+export SHHIST_HISTORY_RANK="${SHHIST_HISTORY_RANK:-}"   # Ctrl+R
+export SHHIST_JUMP_RANK="${SHHIST_JUMP_RANK:-}"         # j, Tab after j
+export SHHIST_FILE_RANK="${SHHIST_FILE_RANK:-}"         # v, shf, Ctrl+G
+# W for duallog / dual.
+export SHHIST_RANK_SHORT_WEIGHT=2
+# Buckets for `seg`: "max_age_seconds:weight" in order, then a bare
+# fallback weight. Default = zoxide-style 4 buckets (1h x4, 1d x2,
+# 1w x0.5, older x0.25); drop one rule for 3 buckets.
+typeset -ga SHHIST_RANK_SEGS=(3600:4 86400:2 604800:0.5 0.25)
+
+# Half-lives in SECONDS. Smaller = faster decay. Long = habit, short =
+# what you're working on right now.
+export SHHIST_HALFLIFE_DIR=$((7 * 24 * 3600))     # directory jump, long:  7 days
+export SHHIST_HALFLIFE_DIR_SHORT=$((6 * 3600))    # directory jump, short: 6 hours
+export SHHIST_HALFLIFE_FILE=$((3 * 24 * 3600))    # file ranking, long:    3 days
+export SHHIST_HALFLIFE_FILE_SHORT=$((6 * 3600))   # file ranking, short:   6 hours
+export SHHIST_HALFLIFE_CMD=$((14 * 24 * 3600))    # commands, long:        14 days
+export SHHIST_HALFLIFE_CMD_SHORT=$((6 * 3600))    # commands, short:       6 hours
 
 # ---------------------------------------------------------------------------
 # Command names (customizable)
@@ -67,7 +94,7 @@ export SHHIST_DELETE_KEY="${SHHIST_DELETE_KEY:-ctrl-x}"
 # Inline suggestions (replaces zsh-autosuggestions)
 # ---------------------------------------------------------------------------
 # Gray "ghost text" completing the line from the sqlite history, ranked by
-# SHHIST_SUGGEST_RANK (below). Right arrow / End accepts it all,
+# SHHIST_SUGGEST_RANK (see Ranking). Right arrow / End accepts it all,
 # Alt+Right (forward-word) accepts the next word. A candidate whose program
 # or file operands are missing right now is skipped.
 # Remove zsh-autosuggestions from oh-my-zsh plugins=(...) to use this; while
@@ -82,23 +109,6 @@ export SHHIST_SUGGEST_STYLE="${SHHIST_SUGGEST_STYLE:-fg=8}"
 # it still moves one character. Right arrow keeps accepting everything.
 # '' = leave the key alone.
 export SHHIST_BIND_ACCEPT_WORD="${SHHIST_BIND_ACCEPT_WORD-^F}"
-# Ranking algorithm for suggestions. Compare them on your own history with
-# `shhist-rank -a <algo> PREFIX` before switching.
-#   duallog  W*S(short) + log2(1 + S(long))   recent work counts fully, long
-#            habit only logarithmically -> new commands can rise (default)
-#   dual     W*S(short) + S(long)             both linear
-#   single   S(long)                          one half-life (old behavior)
-#   seg      runs * weight of newest run's age bucket (SHHIST_SUGGEST_SEGS)
-#   recent   newest matching command (zsh-autosuggestions behavior)
-# S(h) = sum over runs of 0.5 ^ (age / h); long h = SHHIST_HALFLIFE_CMD.
-export SHHIST_SUGGEST_RANK="${SHHIST_SUGGEST_RANK:-duallog}"
-# Short-term half-life (seconds) and its weight W, for duallog / dual.
-export SHHIST_HALFLIFE_CMD_SHORT=$((6 * 3600))   # 6 hours
-export SHHIST_SUGGEST_SHORT_WEIGHT=2
-# Buckets for `seg`: "max_age_seconds:weight" in order, then a bare
-# fallback weight. Default = zoxide-style 4 buckets (1h x4, 1d x2,
-# 1w x0.5, older x0.25); drop one rule for 3 buckets.
-typeset -ga SHHIST_SUGGEST_SEGS=(3600:4 86400:2 604800:0.5 0.25)
 # Top-ranked candidates checked per lookup; the first sound one is shown.
 export SHHIST_SUGGEST_CANDIDATES=20
 # Widgets that accept the whole suggestion / up to the next word when the
@@ -160,7 +170,7 @@ export SHHIST_TRACK_MV=1
 export SHHIST_PRUNE_ON_PICK=1
 # Record exit codes of commands (adds one tiny sqlite call per prompt).
 export SHHIST_TRACK_EXIT=1
-# Max rows fed into fzf for Ctrl+R.
+# Max rows fed into fzf for Ctrl+R (best-ranked first).
 export SHHIST_FZF_LIMIT=20000
 # Extra fzf flags used by all shhist pickers.
 export SHHIST_FZF_OPTS="--height=60% --reverse --border"

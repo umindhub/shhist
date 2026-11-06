@@ -32,15 +32,17 @@ overal      $ vim <Ctrl+G>     # kies een veelgebruikt bestand, het pad wordt in
 - **Permanente geschiedenis** -- elk commando wordt voorgoed in SQLite bewaard,
   met map, tijdstempel en exitcode; `Ctrl+R` doorzoekt alles of alleen de
   commando's die in de huidige map zijn uitgevoerd.
-- **Frecency** -- exponentieel tijdsverval, pas bij het opvragen berekend (geen
-  onderhoudstaken), halfwaardetijd per soort instelbaar (mappen / bestanden /
-  suggesties).
+- **Frecency** -- recent werk en gewoonte op lange termijn krijgen een eigen
+  score (twee halfwaardetijden, gewoonte telt logaritmisch), zodat een nieuw
+  commando of een nieuwe map binnen minuten stijgt in plaats van onder jaren
+  geschiedenis te blijven liggen. Pas bij het opvragen berekend (geen
+  onderhoudstaken); het algoritme is per functie instelbaar.
 - **Uitvoeren met één toets** -- in `Ctrl+R` en `Ctrl+G` voegt Enter in, en
   voegt `ctrl-]` in **en voert uit** in één keer (te koppelen aan Cmd+Enter).
 - **Ter plekke verwijderen** -- `ctrl-x` in elke kiezer verwijdert de
   gemarkeerde map, het bestand of het commando; de kiezer blijft open.
 - **Ingebouwde inline-suggesties** -- grijze spooktekst uit SQLite,
-  gerangschikt op vervallen frequentie; vervangt zsh-autosuggestions.
+  gerangschikt op frecency; vervangt zsh-autosuggestions.
   Kandidaten waarvan het programma of bestandsoperand nu ontbreekt, worden
   overgeslagen.
 - **Vergeet kapotte commando's** -- een commando dat faalt omdat het programma
@@ -128,7 +130,7 @@ zoeken worden overgeslagen.
 | `ctrl-t` (binnen `Ctrl+R`) | wissel tussen alle mappen en commando's uit de **huidige map** |
 | `shhist-import` | eenmalige import van bestaande zsh-geschiedenis (`-f` bij een niet-lege database) |
 
-Duplicaten worden samengevoegd en op laatste gebruik gesorteerd. Commando's van
+Duplicaten worden samengevoegd en op frecency gesorteerd (zie Rangschikking). Commando's van
 meerdere regels worden op één regel getoond (`⏎`) maar precies zo ingevoegd als
 ze getypt zijn.
 
@@ -203,9 +205,45 @@ kunt het meerdere keren in één commando gebruiken.
   het vult de map-/bestandsrangschikking niet, en geïmporteerde commando's hebben
   geen map, dus ze verschijnen alleen in de alle-mappen-weergave van `ctrl-t`.
 
-Een bezoek van N seconden geleden telt als `0.5 ^ (N / half_life)` van een
-bezoek nu. Het verval wordt bij het opvragen berekend, dus een gewijzigde
-halfwaardetijd geldt meteen voor alle bestaande gegevens.
+### Rangschikking
+
+Elke run of elk bezoek telt als `0.5 ^ (leeftijd / half_life)` van een run
+nu. Elk commando, elke map en elk bestand houdt twee van zulke sommen bij:
+**S_short** (halfwaardetijd 6 uur: waar je nu mee bezig bent) en **S_long**
+(halfwaardetijd 7 / 3 / 14 dagen voor mappen / bestanden / commando's:
+gewoonte op lange termijn). De standaardscore is
+`2 × S_short + log2(1 + S_long)`.
+
+Recent werk telt volledig, gewoonte alleen logaritmisch: een commando dat
+vorige maand 200 keer liep, scoort ongeveer 7, een commando dat het afgelopen
+uur 3 keer liep ongeveer 8. Gewoontes winnen nog steeds van eenmalige
+commando's, maar begraven nieuwe niet meer.
+
+| Algoritme | Score |
+|---|---|
+| `duallog` (standaard) | `W × S_short + log2(1 + S_long)` |
+| `dual` | `W × S_short + S_long` |
+| `single` | `S_long` (vorig gedrag) |
+| `seg` | runs × gewicht van de leeftijdsklasse van het nieuwste bezoek (zoxide-stijl, `SHHIST_RANK_SEGS`) |
+| `recent` | nieuwste eerst (zsh-autosuggestions / klassieke `Ctrl+R`) |
+
+`SHHIST_RANK` kiest het algoritme overal; `SHHIST_SUGGEST_RANK`,
+`SHHIST_HISTORY_RANK` (`Ctrl+R`), `SHHIST_JUMP_RANK` (`j`) en
+`SHHIST_FILE_RANK` (`v`, `shf`, `Ctrl+G`) overschrijven het per functie.
+Vergelijk ze eerst op je eigen gegevens:
+
+```sh
+shhist-rank git                  # suggestion order for "git..."
+shhist-rank -a single git        # same prefix, previous algorithm
+shhist-rank                      # whole history, i.e. Ctrl+R order
+shhist-rank -k dir -a seg proj   # what `j proj` would pick with seg
+```
+
+Het verval wordt bij het opvragen berekend, dus een gewijzigde
+halfwaardetijd of een ander algoritme geldt meteen voor alle bestaande
+gegevens. Databases van oudere versies worden bij de eerste start bijgewerkt;
+hun kortetermijnscores en bezoekaantallen voor mappen/bestanden worden
+geschat en worden exact naarmate je shhist blijft gebruiken.
 
 ## Inline-suggesties
 
@@ -277,7 +315,12 @@ export SHHIST_HALFLIFE_DIR=$((14 * 24 * 3600))
 | `SHHIST_SUGGEST_MODE` | `B` | alleen zolang zsh-autosuggestions geladen is: `A` sqlite / `B` zsh-geschiedenis / `AB` beide |
 | `SHHIST_PRUNE_FAILED` | `1` | mislukte commando's met ontbrekend programma of pad vergeten |
 | `SHHIST_INTERP_CMDS` / `SHHIST_PATH_CMDS` / `SHHIST_NOCHECK_CMDS` | zie `config.zsh` | hoe operanden op paden worden gecontroleerd |
-| `SHHIST_HALFLIFE_DIR` / `_FILE` / `_CMD` | 7 / 3 / 14 dagen | frecency-halfwaardetijden (seconden) |
+| `SHHIST_RANK` | `duallog` | rangschikkingsalgoritme (zie Rangschikking) |
+| `SHHIST_SUGGEST_RANK` / `_HISTORY_RANK` / `_JUMP_RANK` / `_FILE_RANK` | `''` | overschrijving per functie (`''` = `SHHIST_RANK`) |
+| `SHHIST_RANK_SHORT_WEIGHT` | `2` | W in `duallog` / `dual` |
+| `SHHIST_RANK_SEGS` | `(3600:4 86400:2 604800:0.5 0.25)` | klassen voor `seg` (`max_age:weight`, dan het standaardgewicht) |
+| `SHHIST_HALFLIFE_DIR` / `_FILE` / `_CMD` | 7 / 3 / 14 dagen | halfwaardetijden lange termijn (seconden) |
+| `SHHIST_HALFLIFE_DIR_SHORT` / `_FILE_SHORT` / `_CMD_SHORT` | 6 uur | halfwaardetijden korte termijn (seconden) |
 | `SHHIST_TRACK_EXIT` | `1` | exitcodes vastleggen |
 | `SHHIST_FZF_LIMIT` | `20000` | max. aantal regels voor `Ctrl+R` |
 | `SHHIST_FZF_OPTS` | `--height=60% --reverse --border` | extra fzf-opties voor alle kiezers |

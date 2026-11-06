@@ -42,54 +42,245 @@ _shhist_q() {
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
+# PRAGMA user_version: 0/1 = original, 2 = frecency has score_s + runs.
 _shhist_init_db() {
-  [[ -f "$SHHIST_DB" ]] && return 0
-  # Create the DB's own directory (SHHIST_DATA_DIR), not SHHIST_DIR --
-  # they're intentionally separate so the install dir can be wiped
-  # without touching stored history.
-  mkdir -p "${SHHIST_DB:h}"
+  if [[ ! -f "$SHHIST_DB" ]]; then
+    # Create the DB's own directory (SHHIST_DATA_DIR), not SHHIST_DIR --
+    # they're intentionally separate so the install dir can be wiped
+    # without touching stored history.
+    mkdir -p "${SHHIST_DB:h}"
+    _shhist_sql "
+      PRAGMA journal_mode = WAL;
+      CREATE TABLE IF NOT EXISTS commands(
+        id        INTEGER PRIMARY KEY,
+        cmd       TEXT NOT NULL,
+        dir       TEXT,
+        ts        INTEGER NOT NULL,
+        exit_code INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_commands_cmd ON commands(cmd);
+      CREATE INDEX IF NOT EXISTS idx_commands_ts  ON commands(ts);
+      CREATE INDEX IF NOT EXISTS idx_commands_dir ON commands(dir);
+      -- kind: 'dir' | 'file'. score / score_s are the long / short
+      -- half-life scores, decayed lazily at read/write time, so no
+      -- periodic maintenance job is ever needed. runs = total visits.
+      CREATE TABLE IF NOT EXISTS frecency(
+        kind    TEXT NOT NULL,
+        path    TEXT NOT NULL,
+        score   REAL NOT NULL,
+        score_s REAL NOT NULL DEFAULT 0,
+        runs    INTEGER NOT NULL DEFAULT 0,
+        last_ts INTEGER NOT NULL,
+        PRIMARY KEY(kind, path)
+      );
+      PRAGMA user_version = 2;
+    " >/dev/null
+    return 0
+  fi
+  local v
+  v="$(_shhist_sql 'PRAGMA user_version;' 2>/dev/null)"
+  (( ${v:-0} >= 2 )) && return 0
+  _shhist_migrate_v2
+}
+
+# Add score_s / runs to an old frecency table. The history of each row is
+# unknown, so: score_s = the last visit only, runs = rounded long score.
+# Safe if two shells race: a duplicate ALTER just fails, the rest repeats.
+_shhist_migrate_v2() {
+  local hs_dir hs_file
+  _shhist_halflives dir;  hs_dir="${reply[1]}"
+  _shhist_halflives file; hs_file="${reply[1]}"
   _shhist_sql "
-    PRAGMA journal_mode = WAL;
-    CREATE TABLE IF NOT EXISTS commands(
-      id        INTEGER PRIMARY KEY,
-      cmd       TEXT NOT NULL,
-      dir       TEXT,
-      ts        INTEGER NOT NULL,
-      exit_code INTEGER
-    );
-    CREATE INDEX IF NOT EXISTS idx_commands_cmd ON commands(cmd);
-    CREATE INDEX IF NOT EXISTS idx_commands_ts  ON commands(ts);
-    CREATE INDEX IF NOT EXISTS idx_commands_dir ON commands(dir);
-    -- kind: 'dir' | 'file'. score decays lazily at read/write time,
-    -- so no periodic maintenance job is ever needed.
-    CREATE TABLE IF NOT EXISTS frecency(
-      kind    TEXT NOT NULL,
-      path    TEXT NOT NULL,
-      score   REAL NOT NULL,
-      last_ts INTEGER NOT NULL,
-      PRIMARY KEY(kind, path)
-    );
-  " >/dev/null
+    ALTER TABLE frecency ADD COLUMN score_s REAL NOT NULL DEFAULT 0;
+    ALTER TABLE frecency ADD COLUMN runs INTEGER NOT NULL DEFAULT 0;
+    UPDATE frecency SET
+      score_s = pow(0.5, (strftime('%s','now') - last_ts)
+                / (CASE kind WHEN 'dir' THEN ${hs_dir}.0 ELSE ${hs_file}.0 END)),
+      runs    = max(1, CAST(round(score) AS INTEGER));
+    PRAGMA user_version = 2;
+  " >/dev/null 2>&1
+}
+
+# ---------------------------------------------------------------------------
+# Ranking (shared by suggestions, Ctrl+R, j, v / shf, Ctrl+G)
+# ---------------------------------------------------------------------------
+# Config values get spliced into SQL, so they are validated first.
+_shhist_num() {  # $1 = value, $2 = default -> REPLY
+  [[ "$1" == (<->|<->.<->|.<->) ]] && REPLY="$1" || REPLY="$2"
+}
+_shhist_pos_int() {  # $1 = value, $2 = default -> REPLY
+  [[ "$1" == <-> ]] && (( $1 > 0 )) && REPLY="$1" || REPLY="$2"
+}
+
+# reply = (short half-life, long half-life) in seconds.
+_shhist_halflives() {  # $1 = cmd | dir | file
+  local s l d hs
+  case "$1" in
+    (dir)  s="$SHHIST_HALFLIFE_DIR_SHORT"  l="$SHHIST_HALFLIFE_DIR"  d=604800 ;;
+    (file) s="$SHHIST_HALFLIFE_FILE_SHORT" l="$SHHIST_HALFLIFE_FILE" d=259200 ;;
+    (*)    s="$SHHIST_HALFLIFE_CMD_SHORT"  l="$SHHIST_HALFLIFE_CMD"  d=1209600 ;;
+  esac
+  _shhist_pos_int "$s" 21600; hs="$REPLY"
+  _shhist_pos_int "$l" "$d"
+  reply=("$hs" "$REPLY")
+}
+
+# REPLY = algorithm for a feature: SHHIST_<feature>_RANK, else SHHIST_RANK.
+_shhist_algo() {  # $1 = SUGGEST | HISTORY | JUMP | FILE
+  local var="SHHIST_${1}_RANK"
+  REPLY="${${(P)var}:-${SHHIST_RANK:-duallog}}"
+  [[ "$REPLY" == (duallog|dual|single|seg|recent) ]] || REPLY=duallog
+}
+
+# REPLY = SQL score expression, higher = better.
+#   duallog  W * S_short + log2(1 + S_long)
+#   dual     W * S_short + S_long
+#   single   S_long
+#   seg      runs * weight of the newest visit's age bucket
+#   recent   newest visit
+_shhist_rank_expr() {  # $1 = algo, $2 = S_short, $3 = S_long, $4 = runs, $5 = newest age, $6 = newest ts
+  local w
+  _shhist_num "$SHHIST_RANK_SHORT_WEIGHT" 2; w="$REPLY"
+  case "$1" in
+    (dual)   REPLY="($w * $2 + $3)" ;;
+    (single) REPLY="$3" ;;
+    (recent) REPLY="$6" ;;
+    (seg)
+      # Rules "max_age:weight" checked in order; a bare weight is the fallback.
+      local r lim wt cases="" last=0.25
+      for r in "${SHHIST_RANK_SEGS[@]}"; do
+        if [[ "$r" == *:* ]]; then
+          _shhist_pos_int "${r%%:*}" 3600; lim="$REPLY"
+          _shhist_num "${r#*:}" 1; wt="$REPLY"
+          cases+=" WHEN $5 < $lim THEN $wt"
+        else
+          _shhist_num "$r" 0.25; last="$REPLY"
+        fi
+      done
+      if [[ -n "$cases" ]]; then
+        REPLY="($4 * CASE$cases ELSE $last END)"
+      else
+        REPLY="($4 * $last)"
+      fi ;;
+    (*)      REPLY="($w * $2 + log2(1 + $3))" ;;
+  esac
+}
+
+# REPLY = score of one GROUP BY cmd group of the commands table.
+_shhist_cmd_score_sql() {  # $1 = algorithm
+  local age="(strftime('%s','now') - ts)"
+  _shhist_halflives cmd
+  _shhist_rank_expr "$1" \
+    "SUM(pow(0.5, $age / ${reply[1]}.0))" \
+    "SUM(pow(0.5, $age / ${reply[2]}.0))" \
+    "COUNT(*)" "MIN($age)" "MAX(ts)"
+}
+
+# REPLY = score of one frecency row, decayed to now.
+_shhist_path_score_sql() {  # $1 = kind, $2 = algorithm
+  local age="(strftime('%s','now') - last_ts)"
+  _shhist_halflives "$1"
+  _shhist_rank_expr "$2" \
+    "score_s * pow(0.5, $age / ${reply[1]}.0)" \
+    "score * pow(0.5, $age / ${reply[2]}.0)" \
+    "runs" "$age" "last_ts"
+}
+
+# REPLY = WHERE condition: cmd starts with $1 (index-friendly, no LIKE escaping).
+_shhist_prefix_cond() {  # $1 = prefix
+  local q="${1//\'/''}"
+  REPLY="cmd > '$q' AND cmd < '$q' || char(1114111)"
+}
+
+# SQL for Ctrl+R: one row per command, "id<sep>display", best-first.
+_shhist_history_sql() {  # $1 = dir to restrict to, '' = all dirs
+  local where=""
+  [[ -n "$1" ]] && where="WHERE dir = '${1//\'/''}'"
+  _shhist_algo HISTORY
+  _shhist_cmd_score_sql "$REPLY"
+  print -r -- "
+    SELECT MAX(id), replace(cmd, char(10), ' ⏎ ')
+    FROM commands $where GROUP BY cmd
+    ORDER BY $REPLY DESC, MAX(ts) DESC LIMIT ${SHHIST_FZF_LIMIT:-20000};"
+}
+
+# Inspect ranking on real data, e.g. to compare algorithms before switching.
+#   shhist-rank [-k cmd|dir|file] [-a algo] [-n N] [WORDS...]
+# cmd: WORDS = command prefix (empty = whole history, i.e. Ctrl+R order).
+# dir/file: WORDS match like `j foo bar` (*foo*bar*).
+shhist-rank() {
+  emulate -L zsh
+  local kind=cmd algo="" n=10 opt OPTARG OPTIND usage
+  usage="usage: shhist-rank [-k cmd|dir|file] [-a duallog|dual|single|seg|recent] [-n N] [WORDS...]"
+  while getopts 'k:a:n:' opt; do
+    case "$opt" in
+      (k) kind="$OPTARG" ;;
+      (a) algo="$OPTARG" ;;
+      (n) _shhist_pos_int "$OPTARG" 10; n="$REPLY" ;;
+      (*) print -u2 "$usage"; return 2 ;;
+    esac
+  done
+  shift $(( OPTIND - 1 ))
+  if [[ "$kind" != (cmd|dir|file) ]] || [[ -n "$algo" && "$algo" != (duallog|dual|single|seg|recent) ]]; then
+    print -u2 "$usage"
+    return 2
+  fi
+  if [[ -z "$algo" ]]; then
+    case "$kind" in
+      (dir)  _shhist_algo JUMP ;;
+      (file) _shhist_algo FILE ;;
+      (*)    _shhist_algo SUGGEST ;;
+    esac
+    algo="$REPLY"
+  fi
+
+  local sql score where=""
+  if [[ "$kind" == cmd ]]; then
+    _shhist_cmd_score_sql "$algo"; score="$REPLY"
+    if (( $# )); then
+      _shhist_prefix_cond "$*"; where="WHERE $REPLY"
+    fi
+    sql="SELECT printf('%12.3f', $score) AS score, COUNT(*) AS runs,
+           datetime(MAX(ts), 'unixepoch', 'localtime') AS last,
+           replace(cmd, char(10), ' ⏎ ') AS cmd
+         FROM commands $where GROUP BY cmd
+         ORDER BY $score DESC, MAX(ts) DESC LIMIT $n;"
+  else
+    _shhist_path_score_sql "$kind" "$algo"; score="$REPLY"
+    if (( $# )); then
+      local pat="%${(j:%:)@}%"
+      where="AND path LIKE '${pat//\'/''}'"
+    fi
+    sql="SELECT printf('%12.3f', $score) AS score, runs,
+           datetime(last_ts, 'unixepoch', 'localtime') AS last, path
+         FROM frecency WHERE kind = '$kind' $where
+         ORDER BY $score DESC, last_ts DESC LIMIT $n;"
+  fi
+  print -r -- "kind: $kind  algorithm: $algo"
+  "$SHHIST_SQLITE" -batch -header -column -cmd '.timeout 300' "$SHHIST_DB" "$sql"
 }
 
 # ---------------------------------------------------------------------------
 # Frecency primitives
 # ---------------------------------------------------------------------------
-# SQL fragment: effective (decayed) score of a row right now.
-#   eff = score * 0.5 ^ (age / half_life)
-_shhist_eff_sql() {  # $1 = half-life in seconds
-  print -r -- "score * pow(0.5, (strftime('%s','now') - last_ts) / CAST($1 AS REAL))"
+# REPLY = SQL recording one visit: decay both scores to now, add 1 to each.
+_shhist_bump_sql() {  # $1 = kind, $2 = absolute path
+  local now="strftime('%s','now')" age="(strftime('%s','now') - last_ts)"
+  _shhist_halflives "$1"
+  REPLY="
+    INSERT INTO frecency(kind, path, score, score_s, runs, last_ts)
+    VALUES ('$1', '${2//\'/''}', 1.0, 1.0, 1, $now)
+    ON CONFLICT(kind, path) DO UPDATE SET
+      score   = score   * pow(0.5, $age / ${reply[2]}.0) + 1.0,
+      score_s = score_s * pow(0.5, $age / ${reply[1]}.0) + 1.0,
+      runs    = runs + 1,
+      last_ts = $now;"
 }
 
-# Record one visit: decay the stored score to "now", then add 1.
-_shhist_bump() {  # $1 = kind, $2 = absolute path, $3 = half-life
-  _shhist_sql "
-    INSERT INTO frecency(kind, path, score, last_ts)
-    VALUES ('$1', '$(_shhist_q "$2")', 1.0, strftime('%s','now'))
-    ON CONFLICT(kind, path) DO UPDATE SET
-      score   = $(_shhist_eff_sql "$3") + 1.0,
-      last_ts = strftime('%s','now');
-  "
+# Record one visit.
+_shhist_bump() {  # $1 = kind, $2 = absolute path
+  _shhist_bump_sql "$1" "$2"
+  _shhist_sql "$REPLY"
 }
 
 # Build the SQL for _shhist_frecent WITHOUT running it. Split out so the
@@ -97,15 +288,17 @@ _shhist_bump() {  # $1 = kind, $2 = absolute path, $3 = half-life
 # `reload(...)` action -- letting them refresh the candidate list in
 # place after a delete instead of closing and relaunching fzf (which is
 # what caused the list to visibly jump by one line).
-_shhist_frecent_sql() {  # $1 = kind, $2 = half-life, $3 = LIKE pattern or ''
+_shhist_frecent_sql() {  # $1 = kind, $2 = LIKE pattern or ''
   local where=""
-  [[ -n "$3" ]] && where="AND path LIKE '$(_shhist_q "$3")'"
-  print -r -- "SELECT path FROM frecency WHERE kind = '$1' $where ORDER BY $(_shhist_eff_sql "$2") DESC;"
+  [[ -n "$2" ]] && where="AND path LIKE '${2//\'/''}'"
+  if [[ "$1" == dir ]]; then _shhist_algo JUMP; else _shhist_algo FILE; fi
+  _shhist_path_score_sql "$1" "$REPLY"
+  print -r -- "SELECT path FROM frecency WHERE kind = '$1' $where ORDER BY $REPLY DESC, last_ts DESC;"
 }
 
-# List paths of a kind, best-first. $3 is an optional LIKE pattern.
-_shhist_frecent() {  # $1 = kind, $2 = half-life, $3 = LIKE pattern or ''
-  _shhist_sql "$(_shhist_frecent_sql "$1" "$2" "$3")"
+# List paths of a kind, best-first. $2 is an optional LIKE pattern.
+_shhist_frecent() {  # $1 = kind, $2 = LIKE pattern or ''
+  _shhist_sql "$(_shhist_frecent_sql "$1" "$2")"
 }
 
 # ---------------------------------------------------------------------------
@@ -123,11 +316,13 @@ _shhist_rename_sql() {  # $1 = old abs path, $2 = new abs path
   local pm="(path = '$o' OR substr(path, 1, length('$o') + 1) = '$o' || '/')"
   local dm="(dir = '$o' OR substr(dir, 1, length('$o') + 1) = '$o' || '/')"
   print -r -- "
-    INSERT INTO frecency(kind, path, score, last_ts)
-      SELECT kind, '$n' || substr(path, length('$o') + 1), score, last_ts
+    INSERT INTO frecency(kind, path, score, score_s, runs, last_ts)
+      SELECT kind, '$n' || substr(path, length('$o') + 1), score, score_s, runs, last_ts
       FROM frecency WHERE $pm
     ON CONFLICT(kind, path) DO UPDATE SET
       score   = frecency.score + excluded.score,
+      score_s = frecency.score_s + excluded.score_s,
+      runs    = frecency.runs + excluded.runs,
       last_ts = max(frecency.last_ts, excluded.last_ts);
     DELETE FROM frecency WHERE $pm;
     UPDATE commands SET dir = '$n' || substr(dir, length('$o') + 1) WHERE $dm;
@@ -505,13 +700,8 @@ _shhist_preexec() {
     [[ "$p" == "~"* ]] && p="${HOME}${p#\~}"     # expand leading tilde
     [[ -f "$p" ]] || continue
     p="${p:A}"                                   # absolute, symlinks resolved
-    sql+="
-      INSERT INTO frecency(kind, path, score, last_ts)
-      VALUES ('file', '$(_shhist_q "$p")', 1.0, strftime('%s','now'))
-      ON CONFLICT(kind, path) DO UPDATE SET
-        score   = $(_shhist_eff_sql "$SHHIST_HALFLIFE_FILE") + 1.0,
-        last_ts = strftime('%s','now');
-    "
+    _shhist_bump_sql file "$p"
+    sql+="$REPLY"
     (( n++ ))
   done
 
@@ -543,7 +733,7 @@ _shhist_precmd() {
 
 # chpwd: every directory change feeds the jump database.
 _shhist_chpwd() {
-  _shhist_bump dir "$PWD" "$SHHIST_HALFLIFE_DIR"
+  _shhist_bump dir "$PWD"
 }
 
 # ---------------------------------------------------------------------------

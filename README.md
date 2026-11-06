@@ -32,15 +32,17 @@ anywhere    $ vim <Ctrl+G>     # pick any frecent file, its path is inserted
 - **Permanent history** -- every command saved to SQLite forever, with
   directory, timestamp, and exit code; `Ctrl+R` searches all of it, or just
   the commands run in the current directory.
-- **Frecency** -- exponential time decay computed lazily at query time (no
-  maintenance jobs), half-life configurable per kind (dirs / files /
-  suggestions).
+- **Frecency** -- recent work and long-term habit are scored separately (two
+  half-lives, habit counted logarithmically), so a new command or directory
+  rises within minutes instead of sitting under years of history. Computed
+  lazily at query time (no maintenance jobs); the algorithm is switchable
+  per feature.
 - **One-stroke execution** -- in `Ctrl+R` and `Ctrl+G`, Enter inserts, and
   `ctrl-]` inserts **and runs** in one stroke (can be mapped to Cmd+Enter).
 - **Delete in place** -- `ctrl-x` inside any picker removes the highlighted
   directory, file, or command and keeps the picker open.
 - **Built-in inline suggestions** -- gray ghost text from SQLite, ranked by
-  decayed frequency; replaces zsh-autosuggestions. Candidates whose program
+  frecency; replaces zsh-autosuggestions. Candidates whose program
   or file operands are missing right now are skipped.
 - **Forgets broken commands** -- a command that fails because its program
   doesn't exist (`command not found`) or a file/directory operand is missing
@@ -123,7 +125,7 @@ exist are pruned from the database the moment they are skipped.
 | `ctrl-t` (inside `Ctrl+R`) | toggle between all directories and commands run in the **current directory** |
 | `shhist-import` | one-shot import of existing zsh history (`-f` to import into a non-empty db) |
 
-Duplicates are collapsed and ordered by last use. Multi-line commands are
+Duplicates are collapsed and ranked by frecency (see Ranking below). Multi-line commands are
 shown on one line (`⏎`) but inserted back exactly as typed.
 
 ### Inside every picker
@@ -196,9 +198,42 @@ you can call it several times in one command.
   does not fill the directory/file rankings, and imported commands have no
   directory, so they show up in `ctrl-t`'s all-dirs view only.
 
-A visit N seconds ago is worth `0.5 ^ (N / half_life)` of a visit now.
-Decay is computed at query time, so changing a half-life applies to all
-existing data instantly.
+### Ranking
+
+Every run or visit is worth `0.5 ^ (age / half_life)` of one right now.
+Each command, directory and file keeps two such sums: **S_short** (half-life
+6 hours: what you're working on now) and **S_long** (half-life 7 / 3 / 14
+days for dirs / files / commands: long-term habit). The default score is
+`2 × S_short + log2(1 + S_long)`.
+
+Recent work counts fully, habit only logarithmically: a command run 200
+times last month scores about 7, one run 3 times in the past hour about 8.
+Habits still beat one-off commands, but no longer bury new ones.
+
+| Algorithm | Score |
+|---|---|
+| `duallog` (default) | `W × S_short + log2(1 + S_long)` |
+| `dual` | `W × S_short + S_long` |
+| `single` | `S_long` (previous behavior) |
+| `seg` | runs × weight of the newest visit's age bucket (zoxide-style, `SHHIST_RANK_SEGS`) |
+| `recent` | newest first (zsh-autosuggestions / classic `Ctrl+R`) |
+
+`SHHIST_RANK` picks the algorithm everywhere; `SHHIST_SUGGEST_RANK`,
+`SHHIST_HISTORY_RANK` (`Ctrl+R`), `SHHIST_JUMP_RANK` (`j`) and
+`SHHIST_FILE_RANK` (`v`, `shf`, `Ctrl+G`) override it per feature. Compare
+them on your own data before switching:
+
+```sh
+shhist-rank git                  # suggestion order for "git..."
+shhist-rank -a single git        # same prefix, previous algorithm
+shhist-rank                      # whole history, i.e. Ctrl+R order
+shhist-rank -k dir -a seg proj   # what `j proj` would pick with seg
+```
+
+Decay is computed at query time, so changing a half-life or the algorithm
+applies to all existing data instantly. Databases from older versions are
+upgraded on first start; their short-term directory/file scores and visit
+counts are estimated and become exact as you keep using shhist.
 
 ## Inline suggestions
 
@@ -268,7 +303,12 @@ export SHHIST_HALFLIFE_DIR=$((14 * 24 * 3600))
 | `SHHIST_SUGGEST_MODE` | `B` | only while zsh-autosuggestions is loaded: `A` sqlite / `B` zsh history / `AB` both |
 | `SHHIST_PRUNE_FAILED` | `1` | forget failed commands with a missing program or path |
 | `SHHIST_INTERP_CMDS` / `SHHIST_PATH_CMDS` / `SHHIST_NOCHECK_CMDS` | see `config.zsh` | how operands are path-checked |
-| `SHHIST_HALFLIFE_DIR` / `_FILE` / `_CMD` | 7 / 3 / 14 days | frecency half-lives (seconds) |
+| `SHHIST_RANK` | `duallog` | ranking algorithm (see Ranking) |
+| `SHHIST_SUGGEST_RANK` / `_HISTORY_RANK` / `_JUMP_RANK` / `_FILE_RANK` | `''` | per-feature override (`''` = `SHHIST_RANK`) |
+| `SHHIST_RANK_SHORT_WEIGHT` | `2` | W in `duallog` / `dual` |
+| `SHHIST_RANK_SEGS` | `(3600:4 86400:2 604800:0.5 0.25)` | buckets for `seg` (`max_age:weight`, then the fallback weight) |
+| `SHHIST_HALFLIFE_DIR` / `_FILE` / `_CMD` | 7 / 3 / 14 days | long-term half-lives (seconds) |
+| `SHHIST_HALFLIFE_DIR_SHORT` / `_FILE_SHORT` / `_CMD_SHORT` | 6 hours | short-term half-lives (seconds) |
 | `SHHIST_TRACK_EXIT` | `1` | record exit codes |
 | `SHHIST_FZF_LIMIT` | `20000` | max rows fed to `Ctrl+R` |
 | `SHHIST_FZF_OPTS` | `--height=60% --reverse --border` | extra fzf flags for all pickers |

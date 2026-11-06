@@ -32,15 +32,17 @@ donde sea   $ vim <Ctrl+G>     # elige un archivo frecuente y se inserta su ruta
 - **Historial permanente**: cada comando se guarda para siempre en SQLite, con
   directorio, marca de tiempo y código de salida; `Ctrl+R` busca en todo o solo
   en los comandos ejecutados en el directorio actual.
-- **Frecency**: decaimiento temporal exponencial calculado de forma perezosa al
-  consultar (sin tareas de mantenimiento), con vida media configurable por tipo
-  (directorios / archivos / sugerencias).
+- **Frecency**: el trabajo reciente y el hábito a largo plazo se puntúan por
+  separado (dos vidas medias, el hábito cuenta de forma logarítmica), así que un
+  comando o directorio nuevo sube en minutos en lugar de quedar enterrado bajo
+  años de historial. Se calcula de forma perezosa al consultar (sin tareas de
+  mantenimiento); el algoritmo se puede cambiar por función.
 - **Ejecución en un solo gesto**: en `Ctrl+R` y `Ctrl+G`, Enter inserta y
   `ctrl-]` inserta **y ejecuta** de una vez (se puede asignar a Cmd+Enter).
 - **Borrado en el sitio**: `ctrl-x` dentro de cualquier selector elimina el
   directorio, archivo o comando resaltado y deja el selector abierto.
 - **Sugerencias en línea integradas**: texto fantasma gris desde SQLite,
-  ordenado por frecuencia decaída; sustituye a zsh-autosuggestions. Se omiten
+  ordenado por frecency; sustituye a zsh-autosuggestions. Se omiten
   los candidatos cuyo programa u operandos de archivo no existen ahora mismo.
 - **Olvida comandos rotos**: un comando que falla porque su programa no
   existe (`command not found`) o falta un operando de archivo/directorio
@@ -125,7 +127,7 @@ la base de datos en cuanto se saltan durante la búsqueda.
 | `ctrl-t` (dentro de `Ctrl+R`) | alterna entre todos los directorios y los comandos ejecutados en el **directorio actual** |
 | `shhist-import` | importación única del historial de zsh existente (`-f` si la base de datos no está vacía) |
 
-Los duplicados se agrupan y se ordenan por último uso. Los comandos multilínea se
+Los duplicados se agrupan y se ordenan por frecency (ver Clasificación). Los comandos multilínea se
 muestran en una línea (`⏎`) pero se insertan exactamente como se escribieron.
 
 ### Dentro de cualquier selector
@@ -200,9 +202,44 @@ puedes usarlo varias veces en un mismo comando.
   comandos importados no tienen directorio, por lo que solo aparecen en la vista
   de todos los directorios de `ctrl-t`.
 
-Una visita de hace N segundos vale `0.5 ^ (N / half_life)` de una visita ahora.
-El decaimiento se calcula al consultar, así que cambiar una vida media se aplica
-al instante a todos los datos existentes.
+### Clasificación
+
+Cada ejecución o visita vale `0.5 ^ (edad / half_life)` de una de ahora mismo.
+Cada comando, directorio y archivo guarda dos sumas de este tipo: **S_short**
+(vida media de 6 horas: en lo que estás trabajando ahora) y **S_long** (vida
+media de 7 / 3 / 14 días para directorios / archivos / comandos: el hábito a
+largo plazo). La puntuación por defecto es `2 × S_short + log2(1 + S_long)`.
+
+El trabajo reciente cuenta entero y el hábito solo de forma logarítmica: un
+comando ejecutado 200 veces el mes pasado obtiene unos 7 puntos, y uno
+ejecutado 3 veces en la última hora, unos 8. Los hábitos siguen ganando a los
+comandos puntuales, pero ya no entierran a los nuevos.
+
+| Algoritmo | Puntuación |
+|---|---|
+| `duallog` (por defecto) | `W × S_short + log2(1 + S_long)` |
+| `dual` | `W × S_short + S_long` |
+| `single` | `S_long` (comportamiento anterior) |
+| `seg` | ejecuciones × peso del tramo de edad de la visita más reciente (estilo zoxide, `SHHIST_RANK_SEGS`) |
+| `recent` | lo más reciente primero (zsh-autosuggestions / `Ctrl+R` clásico) |
+
+`SHHIST_RANK` elige el algoritmo en todas partes; `SHHIST_SUGGEST_RANK`,
+`SHHIST_HISTORY_RANK` (`Ctrl+R`), `SHHIST_JUMP_RANK` (`j`) y
+`SHHIST_FILE_RANK` (`v`, `shf`, `Ctrl+G`) lo sustituyen por función.
+Compáralos con tus propios datos antes de cambiar:
+
+```sh
+shhist-rank git                  # suggestion order for "git..."
+shhist-rank -a single git        # same prefix, previous algorithm
+shhist-rank                      # whole history, i.e. Ctrl+R order
+shhist-rank -k dir -a seg proj   # what `j proj` would pick with seg
+```
+
+El decaimiento se calcula al consultar, así que cambiar una vida media o el
+algoritmo se aplica al instante a todos los datos existentes. Las bases de
+datos de versiones anteriores se actualizan en el primer arranque; sus
+puntuaciones a corto plazo y recuentos de visitas de directorios/archivos se
+estiman y se vuelven exactos a medida que sigues usando shhist.
 
 ## Sugerencias en línea
 
@@ -275,7 +312,12 @@ export SHHIST_HALFLIFE_DIR=$((14 * 24 * 3600))
 | `SHHIST_SUGGEST_MODE` | `B` | solo mientras zsh-autosuggestions está cargado: `A` sqlite / `B` historial de zsh / `AB` ambos |
 | `SHHIST_PRUNE_FAILED` | `1` | olvidar comandos fallidos por programa o ruta inexistente |
 | `SHHIST_INTERP_CMDS` / `SHHIST_PATH_CMDS` / `SHHIST_NOCHECK_CMDS` | ver `config.zsh` | cómo se comprueban las rutas de los operandos |
-| `SHHIST_HALFLIFE_DIR` / `_FILE` / `_CMD` | 7 / 3 / 14 días | vidas medias de frecency (segundos) |
+| `SHHIST_RANK` | `duallog` | algoritmo de clasificación (ver Clasificación) |
+| `SHHIST_SUGGEST_RANK` / `_HISTORY_RANK` / `_JUMP_RANK` / `_FILE_RANK` | `''` | sustitución por función (`''` = `SHHIST_RANK`) |
+| `SHHIST_RANK_SHORT_WEIGHT` | `2` | W en `duallog` / `dual` |
+| `SHHIST_RANK_SEGS` | `(3600:4 86400:2 604800:0.5 0.25)` | tramos para `seg` (`max_age:weight`, luego el peso por defecto) |
+| `SHHIST_HALFLIFE_DIR` / `_FILE` / `_CMD` | 7 / 3 / 14 días | vidas medias a largo plazo (segundos) |
+| `SHHIST_HALFLIFE_DIR_SHORT` / `_FILE_SHORT` / `_CMD_SHORT` | 6 horas | vidas medias a corto plazo (segundos) |
 | `SHHIST_TRACK_EXIT` | `1` | registrar códigos de salida |
 | `SHHIST_FZF_LIMIT` | `20000` | máximo de filas para `Ctrl+R` |
 | `SHHIST_FZF_OPTS` | `--height=60% --reverse --border` | opciones extra de fzf para todos los selectores |

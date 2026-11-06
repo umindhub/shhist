@@ -39,14 +39,14 @@ add-zsh-hook chpwd   _shhist_chpwd
 # aborted. Requires an fzf new enough to support nested parens in
 # --bind action arguments, and an sqlite3 CLI with readfile() (standard
 # in stock builds).
-_shhist_fzf_pick_path() {  # $1=kind $2=half-life $3=prompt $4=initial query (opt) $5=1 for --select-1 (opt)
-  local kind="$1" halflife="$2" prompt="$3" query="${4:-}"
+_shhist_fzf_pick_path() {  # $1=kind $2=prompt $3=initial query (opt) $4=1 for --select-1 (opt)
+  local kind="$1" prompt="$2" query="${3:-}"
   local -a extra=()
-  (( ${5:-0} )) && extra+=(--select-1)
+  (( ${4:-0} )) && extra+=(--select-1)
 
   local list_sql tmp sel
   (( ${SHHIST_PRUNE_ON_PICK:-1} )) && shhist-prune -q "$kind"
-  list_sql="$(_shhist_frecent_sql "$kind" "$halflife" '')"
+  list_sql="$(_shhist_frecent_sql "$kind" '')"
   tmp="$(mktemp "${TMPDIR:-/tmp}/shhist_del.XXXXXX")"
 
   sel="$(
@@ -73,7 +73,7 @@ _shhist_fzf_pick_path() {  # $1=kind $2=half-life $3=prompt $4=initial query (op
 _shhist_jump() {
   local target="" line
   if (( $# == 0 )); then
-    target="$(_shhist_fzf_pick_path dir "$SHHIST_HALFLIFE_DIR" 'jump> ')"
+    target="$(_shhist_fzf_pick_path dir 'jump> ')"
   else
     local pat="%${(j:%:)@}%"
     while IFS= read -r line; do
@@ -83,9 +83,9 @@ _shhist_jump() {
       else
         _shhist_sql "DELETE FROM frecency WHERE kind='dir' AND path='$(_shhist_q "$line")';"
       fi
-    done < <(_shhist_frecent dir "$SHHIST_HALFLIFE_DIR" "$pat")
+    done < <(_shhist_frecent dir "$pat")
     if [[ -z "$target" ]]; then
-      target="$(_shhist_fzf_pick_path dir "$SHHIST_HALFLIFE_DIR" 'jump> ' "$*")"
+      target="$(_shhist_fzf_pick_path dir 'jump> ' "$*")"
     fi
   fi
   [[ -n "$target" && -d "$target" ]] && cd -- "$target"
@@ -104,7 +104,7 @@ _shhist_jump() {
 _shhist_pick_file() {
   local target="" line
   if (( $# == 0 )); then
-    target="$(_shhist_fzf_pick_path file "$SHHIST_HALFLIFE_FILE" 'file> ')"
+    target="$(_shhist_fzf_pick_path file 'file> ')"
   else
     local pat="%${(j:%:)@}%"
     while IFS= read -r line; do
@@ -114,9 +114,9 @@ _shhist_pick_file() {
       else
         _shhist_sql "DELETE FROM frecency WHERE kind='file' AND path='$(_shhist_q "$line")';"
       fi
-    done < <(_shhist_frecent file "$SHHIST_HALFLIFE_FILE" "$pat")
+    done < <(_shhist_frecent file "$pat")
     if [[ -z "$target" ]]; then
-      target="$(_shhist_fzf_pick_path file "$SHHIST_HALFLIFE_FILE" 'file> ' "$*")"
+      target="$(_shhist_fzf_pick_path file 'file> ' "$*")"
     fi
   fi
   [[ -n "$target" && -f "$target" ]] && print -r -- "$target"
@@ -147,17 +147,15 @@ alias -- "${SHHIST_SH_CMD}=_shhist_sh"
 # (never pass --nth here: with --with-nth active, fzf matches against the
 # TRANSFORMED line, which has a single field -- --nth=2.. would match
 # nothing at all). ctrl-t toggles between all dirs and commands run in
-# $PWD; the toggle inspects $FZF_PROMPT (requires fzf >= 0.45).
+# $PWD; the toggle inspects $FZF_PROMPT (requires fzf >= 0.45). Order
+# follows SHHIST_HISTORY_RANK. The reload actions print $SHHIST_Q_* as
+# literal variable names, so fzf never parses the SQL text itself (it
+# contains + and parens, which fzf's action syntax would trip over).
 _shhist_history_widget() {
   local sep=$'\x1f'
-  local q_global="
-    SELECT MAX(id), replace(cmd, char(10), ' ⏎ ')
-    FROM commands GROUP BY cmd
-    ORDER BY MAX(ts) DESC LIMIT $SHHIST_FZF_LIMIT;"
-  local q_local="
-    SELECT MAX(id), replace(cmd, char(10), ' ⏎ ')
-    FROM commands WHERE dir = '$(_shhist_q "$PWD")' GROUP BY cmd
-    ORDER BY MAX(ts) DESC LIMIT $SHHIST_FZF_LIMIT;"
+  local q_global q_local
+  q_global="$(_shhist_history_sql '')"
+  q_local="$(_shhist_history_sql "$PWD")"
 
   # --expect reports which key closed fzf as the FIRST output line, so we
   # can tell a plain Enter (insert only) apart from the run-key (insert +
@@ -180,16 +178,16 @@ _shhist_history_widget() {
         --expect="$SHHIST_FILE_RUN_KEY" \
         --header="enter: insert | ${SHHIST_FILE_RUN_KEY}: insert + run | ${SHHIST_DELETE_KEY}: delete | ctrl-t: toggle all dirs / current dir" \
         --bind='ctrl-t:transform:if [ "$FZF_PROMPT" = "hist:all> " ]; then
-            echo "change-prompt(hist:cwd> )+reload(\"$SHHIST_SQLITE\" -batch -noheader -separator \"$SHHIST_SEP\" \"$SHHIST_DB\" \"$SHHIST_Q_LOCAL\")"
+            echo "change-prompt(hist:cwd> )+reload(\"\$SHHIST_SQLITE\" -batch -noheader -separator \"\$SHHIST_SEP\" \"\$SHHIST_DB\" \"\$SHHIST_Q_LOCAL\")"
           else
-            echo "change-prompt(hist:all> )+reload(\"$SHHIST_SQLITE\" -batch -noheader -separator \"$SHHIST_SEP\" \"$SHHIST_DB\" \"$SHHIST_Q_GLOBAL\")"
+            echo "change-prompt(hist:all> )+reload(\"\$SHHIST_SQLITE\" -batch -noheader -separator \"\$SHHIST_SEP\" \"\$SHHIST_DB\" \"\$SHHIST_Q_GLOBAL\")"
           fi' \
         --bind="$SHHIST_DELETE_KEY"':transform:id=$(printf "%s" {} | cut -d "$SHHIST_SEP" -f1)
             "$SHHIST_SQLITE" -batch -noheader "$SHHIST_DB" "DELETE FROM commands WHERE cmd = (SELECT cmd FROM commands WHERE id = $id);"
             if [ "$FZF_PROMPT" = "hist:all> " ]; then
-              echo "reload(\"$SHHIST_SQLITE\" -batch -noheader -separator \"$SHHIST_SEP\" \"$SHHIST_DB\" \"$SHHIST_Q_GLOBAL\")"
+              echo "reload(\"\$SHHIST_SQLITE\" -batch -noheader -separator \"\$SHHIST_SEP\" \"\$SHHIST_DB\" \"\$SHHIST_Q_GLOBAL\")"
             else
-              echo "reload(\"$SHHIST_SQLITE\" -batch -noheader -separator \"$SHHIST_SEP\" \"$SHHIST_DB\" \"$SHHIST_Q_LOCAL\")"
+              echo "reload(\"\$SHHIST_SQLITE\" -batch -noheader -separator \"\$SHHIST_SEP\" \"\$SHHIST_DB\" \"\$SHHIST_Q_LOCAL\")"
             fi'
   )"
 
@@ -240,7 +238,7 @@ bindkey "$SHHIST_BIND_HISTORY" _shhist_history_widget
 _shhist_file_widget() {
   local list_sql tmp out key sel
   (( ${SHHIST_PRUNE_ON_PICK:-1} )) && shhist-prune -q file
-  list_sql="$(_shhist_frecent_sql file "$SHHIST_HALFLIFE_FILE" '')"
+  list_sql="$(_shhist_frecent_sql file '')"
   tmp="$(mktemp "${TMPDIR:-/tmp}/shhist_del.XXXXXX")"
 
   out="$(
@@ -293,11 +291,11 @@ if [[ -n "$SHHIST_BIND_TAB" ]]; then
   _shhist_tab_widget() {
     local -a words
     words=(${(z)LBUFFER})
-    local kind halflife
+    local kind
     if [[ "${words[1]:-}" == "$SHHIST_JUMP_CMD" ]]; then
-      kind=dir; halflife=$SHHIST_HALFLIFE_DIR
+      kind=dir
     elif [[ "${words[1]:-}" == "$SHHIST_EDIT_CMD" || "${words[1]:-}" == "$SHHIST_SH_CMD" ]]; then
-      kind=file; halflife=$SHHIST_HALFLIFE_FILE
+      kind=file
     else
       zle "${_SHHIST_ORIG_TAB:-expand-or-complete}"
       return
@@ -305,7 +303,7 @@ if [[ -n "$SHHIST_BIND_TAB" ]]; then
 
     local query="${(j: :)words[2,-1]}"
     local target
-    target="$(_shhist_fzf_pick_path "$kind" "$halflife" "${words[1]}> " "$query" 1)"
+    target="$(_shhist_fzf_pick_path "$kind" "${words[1]}> " "$query" 1)"
     if [[ -n "$target" ]]; then
       BUFFER="${words[1]} ${(q)target}"
       zle accept-line

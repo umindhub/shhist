@@ -26,13 +26,14 @@ shhist は 3 つのものを記憶します：実行した**すべてのコマ�
 - **ディレクトリジャンプ** —— `j proj x` で `*proj*x*` に最もよく一致するディレクトリへ移動（`fasd`/`z` 風）。
 - **永久履歴** —— すべてのコマンドをディレクトリ・タイムスタンプ・終了コードとともに SQLite に永久保存。
   `Ctrl+R` で全履歴、または現在のディレクトリで実行したコマンドだけを検索できます。
-- **Frecency** —— クエリ時に遅延計算される指数的な時間減衰（メンテナンス処理は不要）。
-  半減期は種類ごと（ディレクトリ / ファイル / サジェスト）に設定可能。
+- **Frecency** —— 最近の作業と長期的な習慣を別々にスコア化（2 つの半減期、習慣は対数で加算）。
+  新しいコマンドやディレクトリが長年の履歴に埋もれず、数分で上位に来ます。クエリ時に遅延計算
+  （メンテナンス処理は不要）、アルゴリズムは機能ごとに切り替え可能。
 - **ワンストローク実行** —— `Ctrl+R` と `Ctrl+G` では Enter で挿入、`ctrl-]` で挿入**して即実行**
   （Cmd+Enter に割り当て可能）。
 - **その場で削除** —— どのピッカーでも `ctrl-x` でハイライト中のディレクトリ・ファイル・コマンドを削除。
   ピッカーは開いたままです。
-- **組み込みインラインサジェスト** —— SQLite の減衰済み頻度で順位付けしたグレーのゴーストテキスト。
+- **組み込みインラインサジェスト** —— SQLite から frecency で順位付けしたグレーのゴーストテキスト。
   zsh-autosuggestions を置き換えます。プログラムやファイル引数が今存在しない候補はスキップ。
 - **失敗したコマンドを忘れる** —— プログラムが存在しない（`command not found`）、またはファイル/
   ディレクトリ引数がない（`sh missing.sh`、`cd nope`）ために失敗したコマンドは即座に履歴から削除。
@@ -111,7 +112,7 @@ shhist-import
 | `ctrl-t`（`Ctrl+R` 内） | 全ディレクトリ ⇔ **現在のディレクトリ**で実行したコマンドを切り替え |
 | `shhist-import` | 既存の zsh 履歴を一括インポート（DB が空でない場合は `-f`） |
 
-重複はまとめられ、最終使用順に並びます。複数行のコマンドは 1 行（`⏎`）で表示されますが、
+重複はまとめられ、frecency 順に並びます（「ランキング」参照）。複数行のコマンドは 1 行（`⏎`）で表示されますが、
 挿入時は入力したとおりに復元されます。
 
 ### すべてのピッカー共通
@@ -178,8 +179,39 @@ cd ~/project; <Ctrl+R> ctrl-t   # このフォルダで実行したコマンド�
   ディレクトリ/ファイルのランキングは作られません。インポートしたコマンドにはディレクトリ情報がないため、
   `ctrl-t` の全ディレクトリ表示にのみ現れます。
 
-N 秒前の訪問は、現在の訪問の `0.5 ^ (N / half_life)` 倍の価値を持ちます。
-減衰はクエリ時に計算されるため、半減期を変更すると既存データ全体に即座に反映されます。
+### ランキング
+
+各実行・訪問の価値は、現在の 1 回の `0.5 ^ (経過時間 / half_life)` 倍です。
+コマンド・ディレクトリ・ファイルはそれぞれ 2 つの合計を持ちます。**S_short**（半減期 6 時間：
+いま取り組んでいる作業）と **S_long**（半減期はディレクトリ / ファイル / コマンドで 7 / 3 / 14 日：
+長期的な習慣）です。デフォルトのスコアは `2 × S_short + log2(1 + S_long)` です。
+
+最近の作業はそのまま加算され、習慣は対数でしか効きません。先月 200 回実行したコマンドは約 7 点、
+直近 1 時間に 3 回実行したコマンドは約 8 点になります。習慣は一度きりのコマンドには勝ちますが、
+新しいコマンドを埋もれさせることはなくなります。
+
+| アルゴリズム | スコア |
+|---|---|
+| `duallog`（デフォルト） | `W × S_short + log2(1 + S_long)` |
+| `dual` | `W × S_short + S_long` |
+| `single` | `S_long`（従来の動作） |
+| `seg` | 実行回数 × 最新訪問の経過時間区分の重み（zoxide 方式、`SHHIST_RANK_SEGS`） |
+| `recent` | 新しい順（zsh-autosuggestions / 従来の `Ctrl+R`） |
+
+`SHHIST_RANK` で全体のアルゴリズムを選び、`SHHIST_SUGGEST_RANK`、`SHHIST_HISTORY_RANK`（`Ctrl+R`）、
+`SHHIST_JUMP_RANK`（`j`）、`SHHIST_FILE_RANK`（`v`・`shf`・`Ctrl+G`）で機能ごとに上書きできます。
+切り替える前に自分のデータで比較してみてください：
+
+```sh
+shhist-rank git                  # suggestion order for "git..."
+shhist-rank -a single git        # same prefix, previous algorithm
+shhist-rank                      # whole history, i.e. Ctrl+R order
+shhist-rank -k dir -a seg proj   # what `j proj` would pick with seg
+```
+
+減衰はクエリ時に計算されるため、半減期やアルゴリズムを変更すると既存データ全体に即座に反映されます。
+旧バージョンのデータベースは初回起動時に自動で更新されます。ディレクトリ/ファイルの短期スコアと
+訪問回数は推定値から始まり、使い続けるうちに正確になります。
 
 ## インラインサジェスト
 
@@ -241,7 +273,12 @@ export SHHIST_HALFLIFE_DIR=$((14 * 24 * 3600))
 | `SHHIST_SUGGEST_MODE` | `B` | zsh-autosuggestions 読み込み時のみ：`A` sqlite / `B` zsh 履歴 / `AB` 両方 |
 | `SHHIST_PRUNE_FAILED` | `1` | プログラムやパスがなくて失敗したコマンドを忘れる |
 | `SHHIST_INTERP_CMDS` / `SHHIST_PATH_CMDS` / `SHHIST_NOCHECK_CMDS` | `config.zsh` 参照 | 引数のパスチェック方法 |
-| `SHHIST_HALFLIFE_DIR` / `_FILE` / `_CMD` | 7 / 3 / 14 日 | frecency の半減期（秒） |
+| `SHHIST_RANK` | `duallog` | ランキングアルゴリズム（「ランキング」参照） |
+| `SHHIST_SUGGEST_RANK` / `_HISTORY_RANK` / `_JUMP_RANK` / `_FILE_RANK` | `''` | 機能ごとの上書き（`''` = `SHHIST_RANK`） |
+| `SHHIST_RANK_SHORT_WEIGHT` | `2` | `duallog` / `dual` の W |
+| `SHHIST_RANK_SEGS` | `(3600:4 86400:2 604800:0.5 0.25)` | `seg` の区分（`max_age:weight`、最後にデフォルトの重み） |
+| `SHHIST_HALFLIFE_DIR` / `_FILE` / `_CMD` | 7 / 3 / 14 日 | 長期の半減期（秒） |
+| `SHHIST_HALFLIFE_DIR_SHORT` / `_FILE_SHORT` / `_CMD_SHORT` | 6 時間 | 短期の半減期（秒） |
 | `SHHIST_TRACK_EXIT` | `1` | 終了コードを記録 |
 | `SHHIST_FZF_LIMIT` | `20000` | `Ctrl+R` に渡す最大行数 |
 | `SHHIST_FZF_OPTS` | `--height=60% --reverse --border` | 全ピッカー共通の追加 fzf オプション |

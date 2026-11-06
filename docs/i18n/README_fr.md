@@ -33,15 +33,17 @@ partout     $ vim <Ctrl+G>     # choisir un fichier fréquent, son chemin est in
   SQLite, avec répertoire, horodatage et code de sortie ; `Ctrl+R` cherche dans
   tout l'historique ou seulement dans les commandes lancées dans le répertoire
   courant.
-- **Frecency** : décroissance temporelle exponentielle calculée paresseusement à
-  la requête (aucune tâche de maintenance), demi-vie réglable par type
-  (répertoires / fichiers / suggestions).
+- **Frecency** : le travail récent et l'habitude à long terme sont notés
+  séparément (deux demi-vies, l'habitude comptée de façon logarithmique) ; une
+  nouvelle commande ou un nouveau répertoire remonte en quelques minutes au lieu
+  de rester sous des années d'historique. Calculée paresseusement à la requête
+  (aucune tâche de maintenance) ; l'algorithme est réglable par fonction.
 - **Exécution en une touche** : dans `Ctrl+R` et `Ctrl+G`, Entrée insère et
   `ctrl-]` insère **et exécute** d'un seul geste (peut être associé à Cmd+Entrée).
 - **Suppression sur place** : `ctrl-x` dans n'importe quel sélecteur supprime le
   répertoire, le fichier ou la commande en surbrillance, sans fermer le sélecteur.
 - **Suggestions en ligne intégrées** : texte fantôme gris issu de SQLite,
-  classé par fréquence amortie ; remplace zsh-autosuggestions. Les candidats
+  classé par frecency ; remplace zsh-autosuggestions. Les candidats
   dont le programme ou les opérandes fichier manquent actuellement sont ignorés.
 - **Oublie les commandes cassées** : une commande qui échoue parce que son
   programme n'existe pas (`command not found`) ou qu'un opérande
@@ -129,7 +131,7 @@ de la base dès qu'ils sont ignorés pendant la recherche.
 | `ctrl-t` (dans `Ctrl+R`) | bascule entre tous les répertoires et les commandes lancées dans le **répertoire courant** |
 | `shhist-import` | import unique de l'historique zsh existant (`-f` si la base n'est pas vide) |
 
-Les doublons sont regroupés et triés par dernière utilisation. Les commandes
+Les doublons sont regroupés et triés par frecency (voir Classement). Les commandes
 multilignes s'affichent sur une ligne (`⏎`) mais sont réinsérées telles quelles.
 
 ### Dans chaque sélecteur
@@ -205,9 +207,46 @@ l'utiliser plusieurs fois dans une même commande.
   commandes importées n'ont pas de répertoire, elles n'apparaissent donc que dans
   la vue « tous les répertoires » de `ctrl-t`.
 
-Une visite d'il y a N secondes vaut `0.5 ^ (N / half_life)` d'une visite
-actuelle. La décroissance étant calculée à la requête, modifier une demi-vie
-s'applique instantanément à toutes les données existantes.
+### Classement
+
+Chaque exécution ou visite vaut `0.5 ^ (âge / half_life)` d'une exécution
+actuelle. Chaque commande, répertoire et fichier conserve deux sommes de ce
+type : **S_short** (demi-vie de 6 heures : ce sur quoi vous travaillez en ce
+moment) et **S_long** (demi-vie de 7 / 3 / 14 jours pour répertoires /
+fichiers / commandes : l'habitude à long terme). Le score par défaut est
+`2 × S_short + log2(1 + S_long)`.
+
+Le travail récent compte pleinement, l'habitude seulement de façon
+logarithmique : une commande lancée 200 fois le mois dernier obtient environ 7
+points, une commande lancée 3 fois dans l'heure environ 8. Les habitudes
+l'emportent toujours sur les commandes ponctuelles, mais n'enterrent plus les
+nouvelles.
+
+| Algorithme | Score |
+|---|---|
+| `duallog` (par défaut) | `W × S_short + log2(1 + S_long)` |
+| `dual` | `W × S_short + S_long` |
+| `single` | `S_long` (comportement précédent) |
+| `seg` | exécutions × poids de la tranche d'âge de la visite la plus récente (façon zoxide, `SHHIST_RANK_SEGS`) |
+| `recent` | le plus récent d'abord (zsh-autosuggestions / `Ctrl+R` classique) |
+
+`SHHIST_RANK` choisit l'algorithme partout ; `SHHIST_SUGGEST_RANK`,
+`SHHIST_HISTORY_RANK` (`Ctrl+R`), `SHHIST_JUMP_RANK` (`j`) et
+`SHHIST_FILE_RANK` (`v`, `shf`, `Ctrl+G`) le remplacent fonction par
+fonction. Comparez-les sur vos propres données avant de changer :
+
+```sh
+shhist-rank git                  # suggestion order for "git..."
+shhist-rank -a single git        # same prefix, previous algorithm
+shhist-rank                      # whole history, i.e. Ctrl+R order
+shhist-rank -k dir -a seg proj   # what `j proj` would pick with seg
+```
+
+La décroissance étant calculée à la requête, modifier une demi-vie ou
+l'algorithme s'applique instantanément à toutes les données existantes. Les
+bases des versions précédentes sont mises à niveau au premier démarrage ;
+leurs scores à court terme et nombres de visites de répertoires/fichiers sont
+estimés, puis deviennent exacts à l'usage.
 
 ## Suggestions en ligne
 
@@ -280,7 +319,12 @@ export SHHIST_HALFLIFE_DIR=$((14 * 24 * 3600))
 | `SHHIST_SUGGEST_MODE` | `B` | seulement si zsh-autosuggestions est chargé : `A` sqlite / `B` historique zsh / `AB` les deux |
 | `SHHIST_PRUNE_FAILED` | `1` | oublier les commandes échouées à cause d'un programme ou chemin manquant |
 | `SHHIST_INTERP_CMDS` / `SHHIST_PATH_CMDS` / `SHHIST_NOCHECK_CMDS` | voir `config.zsh` | comment les opérandes sont vérifiés |
-| `SHHIST_HALFLIFE_DIR` / `_FILE` / `_CMD` | 7 / 3 / 14 jours | demi-vies de frecency (secondes) |
+| `SHHIST_RANK` | `duallog` | algorithme de classement (voir Classement) |
+| `SHHIST_SUGGEST_RANK` / `_HISTORY_RANK` / `_JUMP_RANK` / `_FILE_RANK` | `''` | remplacement par fonction (`''` = `SHHIST_RANK`) |
+| `SHHIST_RANK_SHORT_WEIGHT` | `2` | W dans `duallog` / `dual` |
+| `SHHIST_RANK_SEGS` | `(3600:4 86400:2 604800:0.5 0.25)` | tranches pour `seg` (`max_age:weight`, puis le poids par défaut) |
+| `SHHIST_HALFLIFE_DIR` / `_FILE` / `_CMD` | 7 / 3 / 14 jours | demi-vies à long terme (secondes) |
+| `SHHIST_HALFLIFE_DIR_SHORT` / `_FILE_SHORT` / `_CMD_SHORT` | 6 heures | demi-vies à court terme (secondes) |
 | `SHHIST_TRACK_EXIT` | `1` | enregistrer les codes de sortie |
 | `SHHIST_FZF_LIMIT` | `20000` | nombre max. de lignes pour `Ctrl+R` |
 | `SHHIST_FZF_OPTS` | `--height=60% --reverse --border` | options fzf supplémentaires pour tous les sélecteurs |

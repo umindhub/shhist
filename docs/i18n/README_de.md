@@ -32,15 +32,17 @@ Befehl einfügen -- ohne den Pfad erneut zu tippen.
 - **Dauerhafter Verlauf** -- jeder Befehl wird für immer in SQLite gespeichert,
   mit Verzeichnis, Zeitstempel und Exit-Code; `Ctrl+R` durchsucht alles oder nur
   die im aktuellen Verzeichnis ausgeführten Befehle.
-- **Frecency** -- exponentieller Zeitverfall, erst bei der Abfrage berechnet
-  (keine Wartungsjobs), Halbwertszeit pro Art einstellbar (Verzeichnisse /
-  Dateien / Vorschläge).
+- **Frecency** -- aktuelle Arbeit und langfristige Gewohnheit werden getrennt
+  bewertet (zwei Halbwertszeiten, Gewohnheit nur logarithmisch), daher steigt
+  ein neuer Befehl oder ein neues Verzeichnis binnen Minuten auf, statt unter
+  jahrelanger Historie zu verschwinden. Erst bei der Abfrage berechnet (keine
+  Wartungsjobs); der Algorithmus ist pro Funktion umschaltbar.
 - **Ausführen mit einem Tastendruck** -- in `Ctrl+R` und `Ctrl+G` fügt Enter ein,
   `ctrl-]` fügt ein **und führt aus** (auf Cmd+Enter abbildbar).
 - **Löschen an Ort und Stelle** -- `ctrl-x` in jeder Auswahlliste entfernt das
   markierte Verzeichnis, die Datei oder den Befehl; die Liste bleibt offen.
 - **Eingebaute Inline-Vorschläge** -- graue Geistertext-Vorschläge aus SQLite,
-  nach zerfallener Häufigkeit gereiht; ersetzt zsh-autosuggestions. Kandidaten,
+  nach Frecency gereiht; ersetzt zsh-autosuggestions. Kandidaten,
   deren Programm oder Datei-Operanden gerade fehlen, werden übersprungen.
 - **Vergisst kaputte Befehle** -- ein Befehl, der scheitert, weil sein Programm
   nicht existiert (`command not found`) oder ein Datei-/Verzeichnis-Operand
@@ -127,7 +129,7 @@ Datenbank entfernt, sobald sie bei der Suche übersprungen werden.
 | `ctrl-t` (in `Ctrl+R`) | umschalten zwischen allen Verzeichnissen und Befehlen aus dem **aktuellen Verzeichnis** |
 | `shhist-import` | einmaliger Import des bestehenden zsh-Verlaufs (`-f` für eine nicht leere DB) |
 
-Duplikate werden zusammengefasst und nach letzter Nutzung sortiert. Mehrzeilige
+Duplikate werden zusammengefasst und nach Frecency sortiert (siehe Rangfolge). Mehrzeilige
 Befehle erscheinen einzeilig (`⏎`), werden aber exakt wie eingegeben eingefügt.
 
 ### In jeder Auswahlliste
@@ -201,9 +203,45 @@ du kannst es also mehrmals in einem Befehl nutzen.
   Verzeichnis-/Datei-Rankings werden nicht befüllt, und importierte Befehle haben
   kein Verzeichnis, erscheinen also nur in der Alle-Verzeichnisse-Ansicht von `ctrl-t`.
 
-Ein Besuch vor N Sekunden zählt `0.5 ^ (N / half_life)` eines Besuchs jetzt.
-Der Verfall wird bei der Abfrage berechnet, eine geänderte Halbwertszeit wirkt
-also sofort auf alle vorhandenen Daten.
+### Rangfolge
+
+Jeder Lauf bzw. Besuch zählt `0.5 ^ (Alter / half_life)` eines Laufs jetzt.
+Jeder Befehl, jedes Verzeichnis und jede Datei führt zwei solche Summen:
+**S_short** (Halbwertszeit 6 Stunden: woran du gerade arbeitest) und
+**S_long** (Halbwertszeit 7 / 3 / 14 Tage für Verzeichnisse / Dateien /
+Befehle: langfristige Gewohnheit). Die Standardwertung ist
+`2 × S_short + log2(1 + S_long)`.
+
+Aktuelle Arbeit zählt voll, Gewohnheit nur logarithmisch: Ein Befehl, der
+letzten Monat 200-mal lief, kommt auf etwa 7 Punkte, einer, der in der letzten
+Stunde 3-mal lief, auf etwa 8. Gewohnheiten schlagen weiterhin
+Einmal-Befehle, begraben neue aber nicht mehr.
+
+| Algorithmus | Wertung |
+|---|---|
+| `duallog` (Standard) | `W × S_short + log2(1 + S_long)` |
+| `dual` | `W × S_short + S_long` |
+| `single` | `S_long` (bisheriges Verhalten) |
+| `seg` | Läufe × Gewicht der Altersstufe des letzten Besuchs (zoxide-artig, `SHHIST_RANK_SEGS`) |
+| `recent` | neueste zuerst (zsh-autosuggestions / klassisches `Ctrl+R`) |
+
+`SHHIST_RANK` wählt den Algorithmus überall; `SHHIST_SUGGEST_RANK`,
+`SHHIST_HISTORY_RANK` (`Ctrl+R`), `SHHIST_JUMP_RANK` (`j`) und
+`SHHIST_FILE_RANK` (`v`, `shf`, `Ctrl+G`) überschreiben ihn pro Funktion.
+Vergleiche sie vor dem Umschalten mit deinen eigenen Daten:
+
+```sh
+shhist-rank git                  # suggestion order for "git..."
+shhist-rank -a single git        # same prefix, previous algorithm
+shhist-rank                      # whole history, i.e. Ctrl+R order
+shhist-rank -k dir -a seg proj   # what `j proj` would pick with seg
+```
+
+Der Verfall wird bei der Abfrage berechnet, eine geänderte Halbwertszeit oder
+ein anderer Algorithmus wirkt also sofort auf alle vorhandenen Daten.
+Datenbanken älterer Versionen werden beim ersten Start aktualisiert; ihre
+kurzfristigen Werte und Besuchszahlen für Verzeichnisse/Dateien werden
+geschätzt und mit weiterer Nutzung exakt.
 
 ## Inline-Vorschläge
 
@@ -275,7 +313,12 @@ export SHHIST_HALFLIFE_DIR=$((14 * 24 * 3600))
 | `SHHIST_SUGGEST_MODE` | `B` | nur solange zsh-autosuggestions geladen ist: `A` sqlite / `B` zsh-Verlauf / `AB` beides |
 | `SHHIST_PRUNE_FAILED` | `1` | gescheiterte Befehle mit fehlendem Programm oder Pfad vergessen |
 | `SHHIST_INTERP_CMDS` / `SHHIST_PATH_CMDS` / `SHHIST_NOCHECK_CMDS` | siehe `config.zsh` | wie Operanden auf Pfade geprüft werden |
-| `SHHIST_HALFLIFE_DIR` / `_FILE` / `_CMD` | 7 / 3 / 14 Tage | Frecency-Halbwertszeiten (Sekunden) |
+| `SHHIST_RANK` | `duallog` | Ranking-Algorithmus (siehe Rangfolge) |
+| `SHHIST_SUGGEST_RANK` / `_HISTORY_RANK` / `_JUMP_RANK` / `_FILE_RANK` | `''` | Überschreibung pro Funktion (`''` = `SHHIST_RANK`) |
+| `SHHIST_RANK_SHORT_WEIGHT` | `2` | W in `duallog` / `dual` |
+| `SHHIST_RANK_SEGS` | `(3600:4 86400:2 604800:0.5 0.25)` | Stufen für `seg` (`max_age:weight`, dann das Rückfallgewicht) |
+| `SHHIST_HALFLIFE_DIR` / `_FILE` / `_CMD` | 7 / 3 / 14 Tage | langfristige Halbwertszeiten (Sekunden) |
+| `SHHIST_HALFLIFE_DIR_SHORT` / `_FILE_SHORT` / `_CMD_SHORT` | 6 Stunden | kurzfristige Halbwertszeiten (Sekunden) |
 | `SHHIST_TRACK_EXIT` | `1` | Exit-Codes aufzeichnen |
 | `SHHIST_FZF_LIMIT` | `20000` | max. Zeilen für `Ctrl+R` |
 | `SHHIST_FZF_OPTS` | `--height=60% --reverse --border` | zusätzliche fzf-Optionen für alle Auswahllisten |

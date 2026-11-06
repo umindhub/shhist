@@ -26,12 +26,13 @@ shhist는 세 가지를 기억합니다: 실행한 **모든 명령**, 들어간 
 - **디렉터리 점프** —— `j proj x`로 `*proj*x*`와 가장 잘 일치하는 디렉터리로 이동(`fasd`/`z` 방식).
 - **영구 히스토리** —— 모든 명령을 디렉터리, 타임스탬프, 종료 코드와 함께 SQLite에 영구 저장.
   `Ctrl+R`로 전체 히스토리 또는 현재 디렉터리에서 실행한 명령만 검색할 수 있습니다.
-- **Frecency** —— 쿼리 시점에 지연 계산되는 지수적 시간 감쇠(유지보수 작업 불필요),
-  반감기는 종류별(디렉터리 / 파일 / 제안)로 설정 가능.
+- **Frecency** —— 최근 작업과 장기적인 습관을 따로 점수화(두 개의 반감기, 습관은 로그로 반영)하여
+  새 명령이나 디렉터리가 수년 치 히스토리에 묻히지 않고 몇 분 안에 위로 올라옵니다. 쿼리 시점에
+  지연 계산(유지보수 작업 불필요), 알고리즘은 기능별로 전환 가능.
 - **원스트로크 실행** —— `Ctrl+R`과 `Ctrl+G`에서 Enter는 삽입, `ctrl-]`는 삽입 **후 즉시 실행**
   (Cmd+Enter에 매핑 가능).
 - **제자리 삭제** —— 모든 선택기에서 `ctrl-x`로 강조된 디렉터리, 파일, 명령을 삭제하며 선택기는 열린 상태를 유지합니다.
-- **내장 인라인 제안** —— SQLite의 감쇠된 빈도로 순위를 매긴 회색 고스트 텍스트로, zsh-autosuggestions를 대체합니다. 프로그램이나 파일 인자가 지금 존재하지 않는 후보는 건너뜁니다.
+- **내장 인라인 제안** —— SQLite에서 frecency로 순위를 매긴 회색 고스트 텍스트로, zsh-autosuggestions를 대체합니다. 프로그램이나 파일 인자가 지금 존재하지 않는 후보는 건너뜁니다.
 - **실패한 명령 잊기** —— 프로그램이 없거나(`command not found`) 파일/디렉터리 인자가 없어서(`sh missing.sh`, `cd nope`) 실패한 명령은 즉시 히스토리에서 삭제됩니다.
 - **히스토리 가져오기** —— `shhist-import`로 기존 zsh 히스토리를 한 번에 가져오며 타임스탬프를 보존합니다.
 
@@ -107,7 +108,7 @@ shhist-import
 | `ctrl-t` (`Ctrl+R` 안에서) | 모든 디렉터리 ⇔ **현재 디렉터리**에서 실행한 명령 전환 |
 | `shhist-import` | 기존 zsh 히스토리를 한 번에 가져오기 (DB가 비어 있지 않으면 `-f`) |
 
-중복은 하나로 합쳐지고 마지막 사용 순으로 정렬됩니다. 여러 줄 명령은 한 줄(`⏎`)로 표시되지만
+중복은 하나로 합쳐지고 frecency 순으로 정렬됩니다("순위" 참고). 여러 줄 명령은 한 줄(`⏎`)로 표시되지만
 삽입할 때는 입력한 그대로 복원됩니다.
 
 ### 모든 선택기 공통
@@ -173,8 +174,39 @@ cd ~/project; <Ctrl+R> ctrl-t   # 이 폴더에서 실행한 명령 불러오기
 - **가져오기** —— `shhist-import`는 명령 텍스트와 타임스탬프만 가져오며 디렉터리/파일 순위는 채우지 않습니다.
   가져온 명령에는 디렉터리 정보가 없으므로 `ctrl-t`의 전체 디렉터리 보기에만 나타납니다.
 
-N초 전의 방문은 지금 방문의 `0.5 ^ (N / half_life)`만큼의 가치를 가집니다.
-감쇠는 쿼리 시점에 계산되므로 반감기를 바꾸면 기존 데이터 전체에 즉시 적용됩니다.
+### 순위
+
+각 실행·방문의 가치는 지금 1회의 `0.5 ^ (경과 시간 / half_life)`배입니다.
+명령·디렉터리·파일은 각각 두 개의 합을 가집니다. **S_short**(반감기 6시간: 지금 하고 있는 작업)와
+**S_long**(반감기는 디렉터리 / 파일 / 명령 각각 7 / 3 / 14일: 장기적인 습관)입니다.
+기본 점수는 `2 × S_short + log2(1 + S_long)`입니다.
+
+최근 작업은 그대로 반영되고 습관은 로그로만 반영됩니다. 지난달 200번 실행한 명령은 약 7점,
+최근 1시간 동안 3번 실행한 명령은 약 8점입니다. 습관은 여전히 일회성 명령보다 앞서지만,
+새 명령을 묻어 버리지는 않습니다.
+
+| 알고리즘 | 점수 |
+|---|---|
+| `duallog` (기본값) | `W × S_short + log2(1 + S_long)` |
+| `dual` | `W × S_short + S_long` |
+| `single` | `S_long` (이전 동작) |
+| `seg` | 실행 횟수 × 최근 방문의 경과 시간 구간 가중치 (zoxide 방식, `SHHIST_RANK_SEGS`) |
+| `recent` | 최신순 (zsh-autosuggestions / 기존 `Ctrl+R`) |
+
+`SHHIST_RANK`로 전체 알고리즘을 고르고, `SHHIST_SUGGEST_RANK`, `SHHIST_HISTORY_RANK`(`Ctrl+R`),
+`SHHIST_JUMP_RANK`(`j`), `SHHIST_FILE_RANK`(`v`, `shf`, `Ctrl+G`)로 기능별로 덮어쓸 수 있습니다.
+바꾸기 전에 자신의 데이터로 비교해 보세요:
+
+```sh
+shhist-rank git                  # suggestion order for "git..."
+shhist-rank -a single git        # same prefix, previous algorithm
+shhist-rank                      # whole history, i.e. Ctrl+R order
+shhist-rank -k dir -a seg proj   # what `j proj` would pick with seg
+```
+
+감쇠는 쿼리 시점에 계산되므로 반감기나 알고리즘을 바꾸면 기존 데이터 전체에 즉시 적용됩니다.
+이전 버전의 데이터베이스는 첫 실행 시 자동으로 업그레이드됩니다. 디렉터리/파일의 단기 점수와
+방문 횟수는 추정값에서 시작해 계속 사용할수록 정확해집니다.
 
 ## 인라인 제안
 
@@ -236,7 +268,12 @@ export SHHIST_HALFLIFE_DIR=$((14 * 24 * 3600))
 | `SHHIST_SUGGEST_MODE` | `B` | zsh-autosuggestions가 로드된 경우에만: `A` sqlite / `B` zsh 히스토리 / `AB` 둘 다 |
 | `SHHIST_PRUNE_FAILED` | `1` | 프로그램이나 경로가 없어 실패한 명령 잊기 |
 | `SHHIST_INTERP_CMDS` / `SHHIST_PATH_CMDS` / `SHHIST_NOCHECK_CMDS` | `config.zsh` 참고 | 인자 경로 검사 방식 |
-| `SHHIST_HALFLIFE_DIR` / `_FILE` / `_CMD` | 7 / 3 / 14일 | frecency 반감기(초) |
+| `SHHIST_RANK` | `duallog` | 순위 알고리즘("순위" 참고) |
+| `SHHIST_SUGGEST_RANK` / `_HISTORY_RANK` / `_JUMP_RANK` / `_FILE_RANK` | `''` | 기능별 덮어쓰기(`''` = `SHHIST_RANK`) |
+| `SHHIST_RANK_SHORT_WEIGHT` | `2` | `duallog` / `dual`의 W |
+| `SHHIST_RANK_SEGS` | `(3600:4 86400:2 604800:0.5 0.25)` | `seg`의 구간(`max_age:weight`, 마지막은 기본 가중치) |
+| `SHHIST_HALFLIFE_DIR` / `_FILE` / `_CMD` | 7 / 3 / 14일 | 장기 반감기(초) |
+| `SHHIST_HALFLIFE_DIR_SHORT` / `_FILE_SHORT` / `_CMD_SHORT` | 6시간 | 단기 반감기(초) |
 | `SHHIST_TRACK_EXIT` | `1` | 종료 코드 기록 |
 | `SHHIST_FZF_LIMIT` | `20000` | `Ctrl+R`에 넘기는 최대 행 수 |
 | `SHHIST_FZF_OPTS` | `--height=60% --reverse --border` | 모든 선택기의 추가 fzf 옵션 |

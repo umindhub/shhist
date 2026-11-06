@@ -26,12 +26,13 @@ shhist 會記住三樣東西：你執行過的**每一條命令**、進入過的
 - **目錄跳轉** —— `j proj x` 跳到最匹配 `*proj*x*` 的目錄，風格類似 `fasd`/`z`。
 - **永久歷史** —— 每條命令連同目錄、時間戳、退出碼永久儲存在 SQLite；
   `Ctrl+R` 可搜尋全部歷史，也可只看在當前目錄執行過的命令。
-- **Frecency** —— 查詢時惰性計算的指數時間衰減（無需任何維護任務），
-  半衰期可按類型（目錄 / 檔案 / 建議）分別配置。
+- **Frecency** —— 近期操作和長期習慣分開計分（雙半衰期，習慣按對數計入），
+  新命令或新目錄幾分鐘內就能排上來，不會被多年的歷史壓住。查詢時惰性計算（無需任何維護任務），
+  演算法可按功能切換。
 - **一鍵執行** —— 在 `Ctrl+R` 和 `Ctrl+G` 中，Enter 只插入，`ctrl-]` 插入**並立即執行**
   （可對映為 Cmd+Enter）。
 - **就地刪除** —— 在任意選擇器中按 `ctrl-x` 刪除高亮的目錄、檔案或命令，選擇器保持開啟。
-- **內建行內建議** —— 來自 SQLite 的灰色提示文字，依衰減後的頻率排序，取代 zsh-autosuggestions。
+- **內建行內建議** —— 來自 SQLite 的灰色提示文字，依 frecency 排序，取代 zsh-autosuggestions。
   程式或檔案參數目前不存在的候選會被略過。
 - **自動忘記失敗命令** —— 因程式不存在（`command not found`）或檔案/目錄參數缺失
   （`sh missing.sh`、`cd nope`）而失敗的命令，會立即從歷史中刪除。
@@ -108,7 +109,7 @@ shhist-import
 | `ctrl-t`（在 `Ctrl+R` 中） | 在「所有目錄」與「**當前目錄**執行過的命令」之間切換 |
 | `shhist-import` | 一次性匯入現有 zsh 歷史（資料庫非空時用 `-f` 強制匯入） |
 
-重複命令會合併，並按最後使用時間排序。多行命令顯示為一行（`⏎`），插入時原樣還原。
+重複命令會合併，並按 frecency 排序（見「排序」）。多行命令顯示為一行（`⏎`），插入時原樣還原。
 
 ### 所有選擇器通用
 
@@ -173,8 +174,37 @@ cd ~/project; <Ctrl+R> ctrl-t   # 找回在這個目錄執行過的命令
 - **匯入** —— `shhist-import` 只匯入命令文本和時間戳，不會填充目錄/檔案排名；
   匯入的命令沒有目錄資訊，因此只出現在 `ctrl-t` 的「所有目錄」檢視中。
 
-N 秒前的一次訪問，價值等於現在一次訪問的 `0.5 ^ (N / half_life)`。
-衰減在查詢時計算，因此修改半衰期會立即作用於全部已有資料。
+### 排序
+
+每次執行或訪問的價值，等於現在一次的 `0.5 ^ (經過時間 / half_life)`。
+每條命令、每個目錄和檔案都維護兩個這樣的累計值：**S_short**（半衰期 6 小時：你目前正在做的事）
+和 **S_long**（目錄 / 檔案 / 命令的半衰期分別為 7 / 3 / 14 天：長期習慣）。
+預設得分為 `2 × S_short + log2(1 + S_long)`。
+
+近期操作按次數完整計分，長期習慣只按對數計分：上個月執行過 200 次的命令約 7 分，
+最近一小時執行了 3 次的命令約 8 分。習慣依然能壓過偶爾執行一次的命令，但不會再把新命令埋沒。
+
+| 演算法 | 得分 |
+|---|---|
+| `duallog`（預設） | `W × S_short + log2(1 + S_long)` |
+| `dual` | `W × S_short + S_long` |
+| `single` | `S_long`（之前的行為） |
+| `seg` | 次數 × 最近一次訪問所在時間段的權重（zoxide 風格，`SHHIST_RANK_SEGS`） |
+| `recent` | 最近的在前（zsh-autosuggestions / 原本的 `Ctrl+R`） |
+
+`SHHIST_RANK` 統一設定演算法；`SHHIST_SUGGEST_RANK`、`SHHIST_HISTORY_RANK`（`Ctrl+R`）、
+`SHHIST_JUMP_RANK`（`j`）和 `SHHIST_FILE_RANK`（`v`、`shf`、`Ctrl+G`）可按功能單獨覆寫。
+切換前可以先用自己的資料比較：
+
+```sh
+shhist-rank git                  # suggestion order for "git..."
+shhist-rank -a single git        # same prefix, previous algorithm
+shhist-rank                      # whole history, i.e. Ctrl+R order
+shhist-rank -k dir -a seg proj   # what `j proj` would pick with seg
+```
+
+衰減在查詢時計算，因此修改半衰期或演算法會立即作用於全部已有資料。舊版本的資料庫會在首次啟動時自動升級；
+目錄/檔案的短期得分和訪問次數先用估算值，隨著繼續使用會逐漸變得準確。
 
 ## 行內建議
 
@@ -235,7 +265,12 @@ export SHHIST_HALFLIFE_DIR=$((14 * 24 * 3600))
 | `SHHIST_SUGGEST_MODE` | `B` | 僅在 zsh-autosuggestions 仍載入時生效：`A` sqlite / `B` zsh 歷史 / `AB` 兩者 |
 | `SHHIST_PRUNE_FAILED` | `1` | 忘記因程式或路徑缺失而失敗的命令 |
 | `SHHIST_INTERP_CMDS` / `SHHIST_PATH_CMDS` / `SHHIST_NOCHECK_CMDS` | 見 `config.zsh` | 參數的路徑檢查方式 |
-| `SHHIST_HALFLIFE_DIR` / `_FILE` / `_CMD` | 7 / 3 / 14 天 | frecency 半衰期（秒） |
+| `SHHIST_RANK` | `duallog` | 排序演算法（見「排序」） |
+| `SHHIST_SUGGEST_RANK` / `_HISTORY_RANK` / `_JUMP_RANK` / `_FILE_RANK` | `''` | 按功能覆寫（`''` = `SHHIST_RANK`） |
+| `SHHIST_RANK_SHORT_WEIGHT` | `2` | `duallog` / `dual` 中的 W |
+| `SHHIST_RANK_SEGS` | `(3600:4 86400:2 604800:0.5 0.25)` | `seg` 的時間段（`max_age:weight`，最後是預設權重） |
+| `SHHIST_HALFLIFE_DIR` / `_FILE` / `_CMD` | 7 / 3 / 14 天 | 長期半衰期（秒） |
+| `SHHIST_HALFLIFE_DIR_SHORT` / `_FILE_SHORT` / `_CMD_SHORT` | 6 小時 | 短期半衰期（秒） |
 | `SHHIST_TRACK_EXIT` | `1` | 記錄退出碼 |
 | `SHHIST_FZF_LIMIT` | `20000` | `Ctrl+R` 最多載入的行數 |
 | `SHHIST_FZF_OPTS` | `--height=60% --reverse --border` | 所有選擇器的額外 fzf 參數 |
