@@ -93,6 +93,25 @@ export SHHIST_FILE_RUN_KEY="${SHHIST_FILE_RUN_KEY:-ctrl-]}"
 # which deletes the character under the cursor in the search box).
 export SHHIST_DELETE_KEY="${SHHIST_DELETE_KEY:-ctrl-x}"
 
+# Quick pick in ALL fzf pickers (Ctrl+R / Ctrl+T / j / v / shf / Tab /
+# Ctrl+G): Opt+1 ... Opt+9, Opt+0 select the 1st ... 10th visible row and
+# accept it at once (same as moving to it and pressing Enter; a run-key
+# still needs to be pressed on its own). Pressing a number beyond the
+# number of rows does nothing. Needs the terminal to send Option as Esc+
+# (iTerm2: Profiles -> Keys -> Left Option key = Esc+; Terminal.app:
+# Profiles -> Keyboard -> "Use Option as Meta key"). 0 = disable.
+export SHHIST_QUICK_PICK="${SHHIST_QUICK_PICK:-1}"
+# Show the keys as right-aligned labels (⌥1 ... ⌥0) on the first 10 rows of
+# every picker. In the path pickers (j / v / shf / Tab / Ctrl+G) this makes
+# shhist filter the list itself (same fuzzy matcher as fzf) so the labels
+# stay correct while you type; the cost is that fzf no longer highlights the
+# matched characters there. 0 = no labels (a header hint is shown instead).
+export SHHIST_QUICK_LABEL="${SHHIST_QUICK_LABEL:-1}"
+# Fallback for terminals where Option still types special characters
+# (US layout: Opt+1..0 = ¡ ™ £ ¢ ∞ § ¶ • ª º). Binds those characters in
+# the pickers too, so they cannot be typed into the fzf query. 0 = off.
+export SHHIST_QUICK_PICK_MAC="${SHHIST_QUICK_PICK_MAC:-1}"
+
 # ---------------------------------------------------------------------------
 # Inline suggestions (replaces zsh-autosuggestions)
 # ---------------------------------------------------------------------------

@@ -5,7 +5,7 @@
 # usage: match.sh QUERY SCOPE
 #   SCOPE: all | cwd | an fzf prompt (anything containing "cwd" = current dir)
 # env:   SHHIST_SQLITE SHHIST_DB SHHIST_SEP SHHIST_SCORE_SQL SHHIST_CWD
-#        SHHIST_FZF_LIMIT
+#        SHHIST_FZF_LIMIT SHHIST_LABEL (optional, label.zsh path)
 #
 # Words are separated by spaces, case-insensitive. A command must contain
 # every word (each as a substring, or, as a last resort, as a fuzzy
@@ -80,11 +80,22 @@ case "${2:-all}" in
   *cwd*) scope="dir = '$(printf '%s' "$SHHIST_CWD" | sed "s/'/''/g")'" ;;
 esac
 
-exec "$SHHIST_SQLITE" -batch -noheader -cmd '.timeout 300' \
-  -separator "$SHHIST_SEP" "$SHHIST_DB" "
+sql="
   SELECT MAX(id), replace(cmd, char(10), ' ⏎ ')
   FROM commands
   WHERE $scope AND $where
   GROUP BY cmd
   ORDER BY $tier, ${SHHIST_SCORE_SQL:-MAX(ts)} DESC, MAX(ts) DESC
   LIMIT ${SHHIST_FZF_LIMIT:-20000};"
+
+run() {
+  "$SHHIST_SQLITE" -batch -noheader -cmd '.timeout 300' \
+    -separator "$SHHIST_SEP" "$SHHIST_DB" "$sql"
+}
+
+# Optional Opt+1..0 labels on the first 10 rows (see label.zsh).
+if [ -n "$SHHIST_LABEL" ]; then
+  run | zsh -f "$SHHIST_LABEL"
+else
+  run
+fi

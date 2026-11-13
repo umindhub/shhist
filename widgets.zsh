@@ -26,6 +26,43 @@ add-zsh-hook precmd  _shhist_precmd
 add-zsh-hook chpwd   _shhist_chpwd
 
 # ---------------------------------------------------------------------------
+# Quick pick: Opt+1..9,0 -> 1st..10th row
+# ---------------------------------------------------------------------------
+# Fills $reply with fzf --bind args. A plain pos(N)+accept would clamp to
+# the last row when fewer than N rows exist, so the bind is guarded by
+# $FZF_MATCH_COUNT and does nothing in that case.
+_shhist_quick_binds() {
+  reply=()
+  (( ${SHHIST_QUICK_PICK:-1} )) || return 0
+  local -a mac=('¡' '™' '£' '¢' '∞' '§' '¶' '•' 'ª' 'º')
+  local i cmd
+  for i in {1..10}; do
+    cmd="[ \"\${FZF_MATCH_COUNT:-0}\" -ge $i ] && echo \"pos($i)+accept\""
+    reply+=("--bind=alt-$(( i % 10 )):transform:$cmd")
+    (( ${SHHIST_QUICK_PICK_MAC:-1} )) && reply+=("--bind=${mac[i]}:transform:$cmd")
+  done
+}
+
+# 1 when rows carry visible Opt+N labels (label.zsh).
+_shhist_labels_on() { (( ${SHHIST_QUICK_PICK:-1} && ${SHHIST_QUICK_LABEL:-1} )) }
+
+# Width fzf will give the list (FZF_COLUMNS only exists once fzf runs).
+_shhist_list_cols() {
+  REPLY=$COLUMNS
+  [[ "$SHHIST_FZF_OPTS" == *--border* ]] && (( REPLY -= 4 ))
+  return 0
+}
+
+# Header hint for the quick-pick keys; empty when labels already show them.
+_shhist_quick_hint() {
+  if (( ${SHHIST_QUICK_PICK:-1} )) && ! _shhist_labels_on; then
+    REPLY=" | opt+1~0: pick 1~10"
+  else
+    REPLY=""
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Shared fzf-over-frecency picker (used by jump/edit/shf/Tab)
 # ---------------------------------------------------------------------------
 # Runs fzf over all frecent paths of a given kind. $SHHIST_DELETE_KEY
@@ -39,26 +76,69 @@ add-zsh-hook chpwd   _shhist_chpwd
 # aborted. Requires an fzf new enough to support nested parens in
 # --bind action arguments, and an sqlite3 CLI with readfile() (standard
 # in stock builds).
+# fzf runner for the frecency path lists. $1=kind $2=prompt $3=query
+# $4=header $5..=extra fzf args. Prints fzf's output (selected path, with an
+# --expect key line first when given); nothing if aborted.
+# Labels on : fzf only draws (--disabled); rows.sh filters (fzf --filter, same
+#   fuzzy scheme) and labels, so Opt+N always matches the row shown. Rows are
+#   "path<SEP>display"; the path is field 1 and is all we ever print/delete.
+# Labels off: plain fzf filtering, rows are bare paths.
+_shhist_fzf_paths() {
+  local kind="$1" prompt="$2" query="$3" header="$4"
+  shift 4
+  local list_sql tmp out hint cols sep=$'\x1f'
+  local -a qb
+  _shhist_list_cols; cols="$REPLY"
+  _shhist_quick_binds; qb=("${reply[@]}")
+  _shhist_quick_hint; hint="$REPLY"
+  (( ${SHHIST_PRUNE_ON_PICK:-1} )) && shhist-prune -q "$kind"
+  list_sql="$(_shhist_frecent_sql "$kind" '')"
+  tmp="$(mktemp "${TMPDIR:-/tmp}/shhist_del.XXXXXX")"
+
+  local del_write reload_cmd
+  local -a mode
+  if _shhist_labels_on; then
+    del_write="printf '%s' {} | cut -d \"\$SHHIST_SEP\" -f1 | tr -d '\\n' > \"\$SHHIST_DEL_FILE\""
+    reload_cmd="sh \"\$SHHIST_ROWS\" \"\$FZF_QUERY\""
+    mode=(--disabled --delimiter="$sep" --with-nth=2.. \
+          --bind='change:reload:sh "$SHHIST_ROWS" {q}')
+  else
+    del_write="printf '%s' {} > \"\$SHHIST_DEL_FILE\""
+    reload_cmd="\"\$SHHIST_SQLITE\" -batch -noheader \"\$SHHIST_DB\" \"\$SHHIST_LIST_SQL\""
+    mode=(--scheme=path --no-sort)
+  fi
+
+  out="$(
+    export SHHIST_LIST_SQL="$list_sql" SHHIST_DEL_FILE="$tmp" SHHIST_KIND="$kind" \
+           SHHIST_SEP="$sep" SHHIST_ROWS="$SHHIST_HOME/rows.sh" \
+           SHHIST_LABEL="$SHHIST_HOME/label.zsh" SHHIST_COLS="$cols"
+    if _shhist_labels_on; then
+      sh "$SHHIST_ROWS" "$query"
+    else
+      "$SHHIST_SQLITE" -batch -noheader "$SHHIST_DB" "$list_sql"
+    fi \
+      | fzf ${=SHHIST_FZF_OPTS} "${mode[@]}" "$@" "${qb[@]}" \
+          --prompt="$prompt" --query="$query" \
+          --header="${header}${hint}" \
+          --bind="${SHHIST_DELETE_KEY}:execute-silent(${del_write}; \"\$SHHIST_SQLITE\" -batch -noheader \"\$SHHIST_DB\" \"DELETE FROM frecency WHERE kind='\$SHHIST_KIND' AND path = CAST(readfile('\$SHHIST_DEL_FILE') AS TEXT);\")+reload(${reload_cmd})"
+  )"
+  rm -f "$tmp"
+
+  [[ -z "$out" ]] && return 0
+  # Keep only field 1 of every line (drops the display column).
+  local -a lines
+  lines=("${(@f)out}")
+  print -rl -- "${(@)lines%%$sep*}"
+}
+
 _shhist_fzf_pick_path() {  # $1=kind $2=prompt $3=initial query (opt) $4=1 for --select-1 (opt)
   local kind="$1" prompt="$2" query="${3:-}"
   local -a extra=()
   (( ${4:-0} )) && extra+=(--select-1)
 
-  local list_sql tmp sel
-  (( ${SHHIST_PRUNE_ON_PICK:-1} )) && shhist-prune -q "$kind"
-  list_sql="$(_shhist_frecent_sql "$kind" '')"
-  tmp="$(mktemp "${TMPDIR:-/tmp}/shhist_del.XXXXXX")"
-
-  sel="$(
-    "$SHHIST_SQLITE" -batch -noheader "$SHHIST_DB" "$list_sql" \
-      | SHHIST_LIST_SQL="$list_sql" SHHIST_DEL_FILE="$tmp" SHHIST_KIND="$kind" \
-        fzf ${=SHHIST_FZF_OPTS} --scheme=path --no-sort "${extra[@]}" \
-          --prompt="$prompt" --query="$query" \
-          --header="enter: select | ${SHHIST_DELETE_KEY}: delete entry" \
-          --bind="${SHHIST_DELETE_KEY}:execute-silent(printf '%s' {} > \"\$SHHIST_DEL_FILE\"; \"\$SHHIST_SQLITE\" -batch -noheader \"\$SHHIST_DB\" \"DELETE FROM frecency WHERE kind='\$SHHIST_KIND' AND path = CAST(readfile('\$SHHIST_DEL_FILE') AS TEXT);\")+reload(\"\$SHHIST_SQLITE\" -batch -noheader \"\$SHHIST_DB\" \"\$SHHIST_LIST_SQL\")"
-  )"
-  rm -f "$tmp"
-
+  local sel
+  sel="$(_shhist_fzf_paths "$kind" "$prompt" "$query" \
+    "enter: select | ${SHHIST_DELETE_KEY}: delete entry" "${extra[@]}")"
   [[ -n "$sel" ]] && print -r -- "$sel"
 }
 
@@ -171,18 +251,29 @@ _shhist_history_pick() {  # $1 = start scope: all | cwd
   # reloads the list for the current query/scope WITHOUT closing fzf.
   # The row's own id is a plain integer straight out of our own SQL, so
   # it's safe to splice into the DELETE statement without escaping.
-  local out key selected id cmd
+  local out key selected id cmd hint cols
+  local -a qb
+  _shhist_quick_binds; qb=("${reply[@]}")
+  _shhist_quick_hint; hint="$REPLY"
+  _shhist_list_cols; cols="$REPLY"
   out="$(
     export SHHIST_SEP="$sep" SHHIST_MATCH="$SHHIST_HOME/match.sh" \
-           SHHIST_SCORE_SQL="$score_sql" SHHIST_CWD="$PWD"
+           SHHIST_SCORE_SQL="$score_sql" SHHIST_CWD="$PWD" \
+           SHHIST_COLS="$cols"
+    # Opt+N labels on the first 10 rows (see label.zsh); unset = none.
+    if _shhist_labels_on; then
+      export SHHIST_LABEL="$SHHIST_HOME/label.zsh"
+    else
+      unset SHHIST_LABEL
+    fi
     sh "$SHHIST_MATCH" "$LBUFFER" "$scope" \
-    | fzf ${=SHHIST_FZF_OPTS} \
+    | fzf ${=SHHIST_FZF_OPTS} "${qb[@]}" \
         --disabled \
         --delimiter="$sep" --with-nth=2.. \
         --query="$LBUFFER" \
         --prompt="$start_prompt" \
         --expect="$SHHIST_FILE_RUN_KEY" \
-        --header="enter: insert | ${SHHIST_FILE_RUN_KEY}: insert + run | ${SHHIST_DELETE_KEY}: delete | ctrl-t: toggle all dirs / current dir" \
+        --header="enter: insert | ${SHHIST_FILE_RUN_KEY}: insert + run | ${SHHIST_DELETE_KEY}: delete | ctrl-t: toggle all dirs / current dir${hint}" \
         --bind='change:reload:sh "$SHHIST_MATCH" {q} "$FZF_PROMPT"' \
         --bind='ctrl-t:transform:if [ "$FZF_PROMPT" = "hist:all> " ]; then
             echo "change-prompt(hist:cwd> )+reload(sh \"\$SHHIST_MATCH\" \"\$FZF_QUERY\" cwd)"
@@ -247,20 +338,10 @@ zle -N _shhist_history_cwd_widget
 # the list doesn't jump. --expect is only needed now to tell "insert" and
 # "insert + run" apart.
 _shhist_file_widget() {
-  local list_sql tmp out key sel
-  (( ${SHHIST_PRUNE_ON_PICK:-1} )) && shhist-prune -q file
-  list_sql="$(_shhist_frecent_sql file '')"
-  tmp="$(mktemp "${TMPDIR:-/tmp}/shhist_del.XXXXXX")"
-
-  out="$(
-    "$SHHIST_SQLITE" -batch -noheader "$SHHIST_DB" "$list_sql" \
-      | SHHIST_LIST_SQL="$list_sql" SHHIST_DEL_FILE="$tmp" \
-        fzf ${=SHHIST_FZF_OPTS} --scheme=path --no-sort --prompt='file> ' \
-          --expect="$SHHIST_FILE_RUN_KEY" \
-          --header="enter: insert | ${SHHIST_FILE_RUN_KEY}: insert + run | ${SHHIST_DELETE_KEY}: delete entry" \
-          --bind="${SHHIST_DELETE_KEY}:execute-silent(printf '%s' {} > \"\$SHHIST_DEL_FILE\"; \"\$SHHIST_SQLITE\" -batch -noheader \"\$SHHIST_DB\" \"DELETE FROM frecency WHERE kind='file' AND path = CAST(readfile('\$SHHIST_DEL_FILE') AS TEXT);\")+reload(\"\$SHHIST_SQLITE\" -batch -noheader \"\$SHHIST_DB\" \"\$SHHIST_LIST_SQL\")"
-  )"
-  rm -f "$tmp"
+  local out key sel
+  out="$(_shhist_fzf_paths file 'file> ' '' \
+    "enter: insert | ${SHHIST_FILE_RUN_KEY}: insert + run | ${SHHIST_DELETE_KEY}: delete entry" \
+    --expect="$SHHIST_FILE_RUN_KEY")"
 
   if [[ -z "$out" ]]; then
     zle redisplay
