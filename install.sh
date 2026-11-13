@@ -40,8 +40,8 @@ if [[ "${REPO_DIR:A}" == "${INSTALL_DIR:A}" ]]; then
   ok "repo is the install dir ($INSTALL_DIR) -- in-place install, updates via git pull"
 else
   mkdir -p "$INSTALL_DIR"
-  cp "$REPO_DIR/core.zsh" "$REPO_DIR/widgets.zsh" "$REPO_DIR/suggest.zsh" "$INSTALL_DIR/"
-  ok "installed core.zsh, widgets.zsh, suggest.zsh -> $INSTALL_DIR"
+  cp "$REPO_DIR/core.zsh" "$REPO_DIR/widgets.zsh" "$REPO_DIR/suggest.zsh" "$REPO_DIR/match.sh" "$INSTALL_DIR/"
+  ok "installed core.zsh, widgets.zsh, suggest.zsh, match.sh -> $INSTALL_DIR"
 
   # config.zsh holds user edits: install once, never overwrite.
   if [[ -f "$INSTALL_DIR/config.zsh" ]]; then

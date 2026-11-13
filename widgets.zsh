@@ -143,58 +143,55 @@ alias -- "${SHHIST_SH_CMD}=_shhist_sh"
 # ---------------------------------------------------------------------------
 # Rows are "id<US>display" where display has newlines flattened to ' ⏎ '
 # for fzf; on accept we fetch the ORIGINAL command by id, so multi-line
-# commands round-trip intact. Matching runs on the displayed text only
-# (never pass --nth here: with --with-nth active, fzf matches against the
-# TRANSFORMED line, which has a single field -- --nth=2.. would match
-# nothing at all). ctrl-t toggles between all dirs and commands run in
-# $PWD; the toggle inspects $FZF_PROMPT (requires fzf >= 0.45). Order
-# follows SHHIST_HISTORY_RANK. The reload actions print $SHHIST_Q_* as
-# literal variable names, so fzf never parses the SQL text itself (it
-# contains + and parens, which fzf's action syntax would trip over).
+# commands round-trip intact. fzf runs with --disabled: it only draws the
+# list and never filters or sorts it. Every keystroke (change event)
+# re-runs match.sh, which filters and orders in SQL (see its header):
+# phrase matches first, then frecency (SHHIST_HISTORY_RANK) inside each
+# match tier. fzf's own fuzzy ranking cannot put `sh create_x.sh` above
+# `gd create_x.sh` (".sh" fuzzy-matches "sh"), hence the custom matcher.
+# ctrl-t toggles between all dirs and commands run in $PWD; the toggle
+# inspects $FZF_PROMPT (requires fzf >= 0.45). Actions only reference
+# environment variables ($SHHIST_MATCH, $FZF_QUERY, ...) and never embed
+# SQL or user text, so fzf's action parser (parens, quotes) never sees it.
+# Matching is plain text: fzf's extended syntax (^ $ ' !) is not applied.
 _shhist_history_pick() {  # $1 = start scope: all | cwd
   local sep=$'\x1f'
-  local start_prompt='hist:all> ' start_sql
-  local q_global q_local
-  q_global="$(_shhist_history_sql '')"
-  q_local="$(_shhist_history_sql "$PWD")"
-  start_sql="$q_global"
+  local start_prompt='hist:all> ' scope=all score_sql
   if [[ "${1:-all}" == cwd ]]; then
     start_prompt='hist:cwd> '
-    start_sql="$q_local"
+    scope=cwd
   fi
+  _shhist_algo HISTORY
+  _shhist_cmd_score_sql "$REPLY"
+  score_sql="$REPLY"
 
   # --expect reports which key closed fzf as the FIRST output line, so we
   # can tell a plain Enter (insert only) apart from the run-key (insert +
-  # execute). The delete-key is no longer in --expect: deleting is bound
-  # via `transform`, same trick as ctrl-t's toggle below, so it deletes
-  # AND reloads the currently-active scope (all/cwd) WITHOUT closing
-  # fzf -- that's what used to make the list visibly jump by one line.
+  # execute). The delete-key is bound via `transform`: it deletes AND
+  # reloads the list for the current query/scope WITHOUT closing fzf.
   # The row's own id is a plain integer straight out of our own SQL, so
   # it's safe to splice into the DELETE statement without escaping.
   local out key selected id cmd
   out="$(
-    "$SHHIST_SQLITE" -batch -noheader -cmd '.timeout 300' -separator "$sep" \
-        "$SHHIST_DB" "$start_sql" \
-    | SHHIST_SEP="$sep" SHHIST_Q_GLOBAL="$q_global" SHHIST_Q_LOCAL="$q_local" \
-      fzf ${=SHHIST_FZF_OPTS} \
-        --scheme=history --no-sort \
+    export SHHIST_SEP="$sep" SHHIST_MATCH="$SHHIST_HOME/match.sh" \
+           SHHIST_SCORE_SQL="$score_sql" SHHIST_CWD="$PWD"
+    sh "$SHHIST_MATCH" "$LBUFFER" "$scope" \
+    | fzf ${=SHHIST_FZF_OPTS} \
+        --disabled \
         --delimiter="$sep" --with-nth=2.. \
         --query="$LBUFFER" \
         --prompt="$start_prompt" \
         --expect="$SHHIST_FILE_RUN_KEY" \
         --header="enter: insert | ${SHHIST_FILE_RUN_KEY}: insert + run | ${SHHIST_DELETE_KEY}: delete | ctrl-t: toggle all dirs / current dir" \
+        --bind='change:reload:sh "$SHHIST_MATCH" {q} "$FZF_PROMPT"' \
         --bind='ctrl-t:transform:if [ "$FZF_PROMPT" = "hist:all> " ]; then
-            echo "change-prompt(hist:cwd> )+reload(\"\$SHHIST_SQLITE\" -batch -noheader -separator \"\$SHHIST_SEP\" \"\$SHHIST_DB\" \"\$SHHIST_Q_LOCAL\")"
+            echo "change-prompt(hist:cwd> )+reload(sh \"\$SHHIST_MATCH\" \"\$FZF_QUERY\" cwd)"
           else
-            echo "change-prompt(hist:all> )+reload(\"\$SHHIST_SQLITE\" -batch -noheader -separator \"\$SHHIST_SEP\" \"\$SHHIST_DB\" \"\$SHHIST_Q_GLOBAL\")"
+            echo "change-prompt(hist:all> )+reload(sh \"\$SHHIST_MATCH\" \"\$FZF_QUERY\" all)"
           fi' \
         --bind="$SHHIST_DELETE_KEY"':transform:id=$(printf "%s" {} | cut -d "$SHHIST_SEP" -f1)
             "$SHHIST_SQLITE" -batch -noheader "$SHHIST_DB" "DELETE FROM commands WHERE cmd = (SELECT cmd FROM commands WHERE id = $id);"
-            if [ "$FZF_PROMPT" = "hist:all> " ]; then
-              echo "reload(\"\$SHHIST_SQLITE\" -batch -noheader -separator \"\$SHHIST_SEP\" \"\$SHHIST_DB\" \"\$SHHIST_Q_GLOBAL\")"
-            else
-              echo "reload(\"\$SHHIST_SQLITE\" -batch -noheader -separator \"\$SHHIST_SEP\" \"\$SHHIST_DB\" \"\$SHHIST_Q_LOCAL\")"
-            fi'
+            echo "reload(sh \"\$SHHIST_MATCH\" \"\$FZF_QUERY\" \"\$FZF_PROMPT\")"'
   )"
 
   if [[ -z "$out" ]]; then
