@@ -122,7 +122,8 @@ exist are pruned from the database the moment they are skipped.
 | Action | What it does |
 |---|---|
 | `Ctrl+R` | fzf over the SQLite history, pre-filled with what you have typed; Enter = insert, `ctrl-]` = insert + run |
-| `ctrl-t` (inside `Ctrl+R`) | toggle between all directories and commands run in the **current directory** |
+| `Ctrl+T` | open the history picker directly on commands run in the **current directory** |
+| `ctrl-t` (inside the picker) | toggle between all directories and commands run in the **current directory** |
 | `shhist-import` | one-shot import of existing zsh history (`-f` to import into a non-empty db) |
 
 Duplicates are collapsed and ranked by frecency (see Ranking below). Multi-line commands are
@@ -292,6 +293,7 @@ export SHHIST_HALFLIFE_DIR=$((14 * 24 * 3600))
 | `SHHIST_SQLITE` | auto-detect | sqlite3 binary with math functions |
 | `SHHIST_JUMP_CMD` / `SHHIST_EDIT_CMD` / `SHHIST_SH_CMD` | `j` / `v` / `shf` | command names |
 | `SHHIST_BIND_HISTORY` / `SHHIST_BIND_FILE` | `^R` / `^G` | widget key bindings |
+| `SHHIST_BIND_HISTORY_CWD` | `^T` | history picker starting in the current dir (`''` disables) |
 | `SHHIST_BIND_TAB` | `^I` | Tab picker on `j`/`v`/`shf` lines (`''` disables) |
 | `SHHIST_FILE_RUN_KEY` | `ctrl-]` | insert + run key in `Ctrl+R` / `Ctrl+G` |
 | `SHHIST_DELETE_KEY` | `ctrl-x` | delete key in all pickers |

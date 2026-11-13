@@ -151,11 +151,17 @@ alias -- "${SHHIST_SH_CMD}=_shhist_sh"
 # follows SHHIST_HISTORY_RANK. The reload actions print $SHHIST_Q_* as
 # literal variable names, so fzf never parses the SQL text itself (it
 # contains + and parens, which fzf's action syntax would trip over).
-_shhist_history_widget() {
+_shhist_history_pick() {  # $1 = start scope: all | cwd
   local sep=$'\x1f'
+  local start_prompt='hist:all> ' start_sql
   local q_global q_local
   q_global="$(_shhist_history_sql '')"
   q_local="$(_shhist_history_sql "$PWD")"
+  start_sql="$q_global"
+  if [[ "${1:-all}" == cwd ]]; then
+    start_prompt='hist:cwd> '
+    start_sql="$q_local"
+  fi
 
   # --expect reports which key closed fzf as the FIRST output line, so we
   # can tell a plain Enter (insert only) apart from the run-key (insert +
@@ -168,13 +174,13 @@ _shhist_history_widget() {
   local out key selected id cmd
   out="$(
     "$SHHIST_SQLITE" -batch -noheader -cmd '.timeout 300' -separator "$sep" \
-        "$SHHIST_DB" "$q_global" \
+        "$SHHIST_DB" "$start_sql" \
     | SHHIST_SEP="$sep" SHHIST_Q_GLOBAL="$q_global" SHHIST_Q_LOCAL="$q_local" \
       fzf ${=SHHIST_FZF_OPTS} \
         --scheme=history --no-sort \
         --delimiter="$sep" --with-nth=2.. \
         --query="$LBUFFER" \
-        --prompt='hist:all> ' \
+        --prompt="$start_prompt" \
         --expect="$SHHIST_FILE_RUN_KEY" \
         --header="enter: insert | ${SHHIST_FILE_RUN_KEY}: insert + run | ${SHHIST_DELETE_KEY}: delete | ctrl-t: toggle all dirs / current dir" \
         --bind='ctrl-t:transform:if [ "$FZF_PROMPT" = "hist:all> " ]; then
@@ -221,8 +227,16 @@ _shhist_history_widget() {
   fi
   zle redisplay
 }
+
+# Ctrl+R: start in all-dirs scope.
+_shhist_history_widget() { _shhist_history_pick all }
 zle -N _shhist_history_widget
 bindkey "$SHHIST_BIND_HISTORY" _shhist_history_widget
+
+# Ctrl+T: start directly in current-dir scope (ctrl-t inside toggles to all).
+_shhist_history_cwd_widget() { _shhist_history_pick cwd }
+zle -N _shhist_history_cwd_widget
+[[ -n "$SHHIST_BIND_HISTORY_CWD" ]] && bindkey "$SHHIST_BIND_HISTORY_CWD" _shhist_history_cwd_widget
 
 # ---------------------------------------------------------------------------
 # File picker widget: insert a frecent file path at the cursor

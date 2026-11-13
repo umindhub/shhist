@@ -65,6 +65,9 @@ export SHHIST_SH_CMD="${SHHIST_SH_CMD:-shf}"      # run frecent file with sh
 # Key bindings
 # ---------------------------------------------------------------------------
 export SHHIST_BIND_HISTORY='^R'   # fzf command history search
+# Same picker, but opens directly on commands run in the current directory
+# (overrides fzf's default Ctrl+T file widget). '' = leave the key alone.
+export SHHIST_BIND_HISTORY_CWD="${SHHIST_BIND_HISTORY_CWD-^T}"
 export SHHIST_BIND_FILE='^G'      # insert a frecent file path at cursor
 # Tab on a line starting with the jump/edit command opens fzf and jumps
 # on Enter; any other line falls through to your normal completion.
