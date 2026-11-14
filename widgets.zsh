@@ -229,7 +229,7 @@ alias -- "${SHHIST_SH_CMD}=_shhist_sh"
 # phrase matches first, then frecency (SHHIST_HISTORY_RANK) inside each
 # match tier. fzf's own fuzzy ranking cannot put `sh create_x.sh` above
 # `gd create_x.sh` (".sh" fuzzy-matches "sh"), hence the custom matcher.
-# ctrl-t toggles between all dirs and commands run in $PWD; the toggle
+# ctrl-r always jumps to all dirs; ctrl-t toggles between all dirs and commands run in $PWD; the toggle
 # inspects $FZF_PROMPT (requires fzf >= 0.45). Actions only reference
 # environment variables ($SHHIST_MATCH, $FZF_QUERY, ...) and never embed
 # SQL or user text, so fzf's action parser (parens, quotes) never sees it.
@@ -273,8 +273,9 @@ _shhist_history_pick() {  # $1 = start scope: all | cwd
         --query="$LBUFFER" \
         --prompt="$start_prompt" \
         --expect="$SHHIST_FILE_RUN_KEY" \
-        --header="enter: insert | ${SHHIST_FILE_RUN_KEY}: insert + run | ${SHHIST_DELETE_KEY}: delete | ctrl-t: toggle all dirs / current dir${hint}" \
+        --header="enter: insert | ${SHHIST_FILE_RUN_KEY}: insert + run | ${SHHIST_DELETE_KEY}: delete | ctrl-r: all dirs | ctrl-t: toggle all / current dir${hint}" \
         --bind='change:reload:sh "$SHHIST_MATCH" {q} "$FZF_PROMPT"' \
+        --bind='ctrl-r:change-prompt(hist:all> )+reload(sh "$SHHIST_MATCH" {q} all)' \
         --bind='ctrl-t:transform:if [ "$FZF_PROMPT" = "hist:all> " ]; then
             echo "change-prompt(hist:cwd> )+reload(sh \"\$SHHIST_MATCH\" \"\$FZF_QUERY\" cwd)"
           else
