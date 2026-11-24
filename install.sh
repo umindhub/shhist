@@ -15,8 +15,20 @@ ok()   { print -P "%F{green}✓%f $1" }
 warn() { print -P "%F{yellow}!%f $1" }
 die()  { print -P "%F{red}✗%f $1" >&2; exit 1 }
 
+# Print an install command that fits the current OS / package manager.
+pkg_hint() {  # $1 = brew name, $2 = linux package name
+  if [[ "$OSTYPE" == darwin* ]]; then print "brew install $1"
+  elif command -v dnf     >/dev/null 2>&1; then print "dnf install -y $2"
+  elif command -v yum     >/dev/null 2>&1; then print "yum install -y $2"
+  elif command -v apt-get >/dev/null 2>&1; then print "apt-get install -y $2"
+  elif command -v apk     >/dev/null 2>&1; then print "apk add $2"
+  elif command -v pacman  >/dev/null 2>&1; then print "pacman -S $2"
+  else print "install $2 with your package manager"
+  fi
+}
+
 # --- 1. Dependency checks ---------------------------------------------------
-command -v fzf >/dev/null 2>&1 || die "fzf not found -- brew install fzf"
+command -v fzf >/dev/null 2>&1 || die "fzf not found -- $(pkg_hint fzf fzf)"
 ok "fzf $(fzf --version | cut -d' ' -f1)"
 
 # Need a sqlite3 built with math functions (pow) for the frecency queries.
@@ -41,12 +53,14 @@ if [[ -z "$sqlite_bin" ]]; then
     # (or older than 3.35), so pow() is missing.
     warn "found sqlite3 but it has no math functions (pow): ${(j:, :)found_no_math}"
     warn "need sqlite >= 3.35 built with math functions."
-    warn "build one from source:  $INSTALL_DIR/build-sqlite.sh"
-    die  "or set SHHIST_SQLITE=/path/to/sqlite3 to use a different build"
+    warn "build one from source:  sh $INSTALL_DIR/build-sqlite.sh"
+    warn "or set SHHIST_SQLITE=/path/to/sqlite3 to use a different build."
+    die  "then run this installer again"
   fi
   warn "sqlite3 not found in PATH."
-  warn "build one from source:  $INSTALL_DIR/build-sqlite.sh"
-  die  "or install it with your package manager (brew install sqlite)"
+  warn "build one from source:  sh $INSTALL_DIR/build-sqlite.sh"
+  warn "or install it:  $(pkg_hint sqlite sqlite)  (must be >= 3.35 with math functions)"
+  die  "then run this installer again"
 fi
 ok "sqlite3 with math functions: $sqlite_bin"
 

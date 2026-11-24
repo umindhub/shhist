@@ -24,7 +24,7 @@ _shhist_resolve_sqlite() {
     export SHHIST_SQLITE
     return 0
   done
-  print -u2 "shhist: no sqlite3 with math functions (pow) found -- need sqlite >= 3.35 with math enabled; run ${SHHIST_DIR:-$HOME/.config/shhist}/build-sqlite.sh, or set SHHIST_SQLITE to override"
+  print -u2 "shhist: no sqlite3 with math functions (pow) found -- need sqlite >= 3.35 with math enabled; run: sh ${SHHIST_DIR:-$HOME/.config/shhist}/build-sqlite.sh , or set SHHIST_SQLITE to override"
   return 1
 }
 

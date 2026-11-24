@@ -5,12 +5,15 @@
 # with SQLITE_ENABLE_MATH_FUNCTIONS. Prebuilt binaries from sqlite.org need a
 # newer glibc than old distros (e.g. CentOS 8) have, so build from source here.
 #
-# Usage:  ./build-sqlite.sh [-y]
+# Usage:  sh build-sqlite.sh [-y]
 #   -y                assume "yes" at the confirmation prompt
 # Env overrides:
 #   PREFIX=/usr/local install prefix (binary goes to $PREFIX/bin)
 #   SQLITE_URL=...    custom download URL (e.g. a mirror)
 #   FORCE=1           rebuild even if a working sqlite3 is already installed
+
+# Re-exec under bash when started via `sh script` (dash has no arrays/[[ ]]/pipefail).
+[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
 
 set -euo pipefail
 
