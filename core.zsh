@@ -14,8 +14,12 @@ _shhist_resolve_sqlite() {
   candidates+=(
     /opt/homebrew/opt/sqlite/bin/sqlite3   # Apple Silicon Homebrew
     /usr/local/opt/sqlite/bin/sqlite3      # Intel Homebrew
-    sqlite3                                # whatever is on PATH
   )
+  # Every sqlite3 on PATH, in PATH order. Looked up with an explicit glob
+  # instead of the command hash table, which goes stale when a binary is
+  # installed after the shell started (the old /usr/bin one stays cached).
+  candidates+=( ${^path}/sqlite3(N-*) )
+  candidates+=( sqlite3 )                  # last resort: command hash
   for cand in "${candidates[@]}"; do
     [[ -x "$cand" ]] || cand="${commands[$cand]:-}"
     [[ -x "$cand" ]] || continue
@@ -737,58 +741,202 @@ _shhist_chpwd() {
 }
 
 # ---------------------------------------------------------------------------
-# One-time import of existing zsh history
+# Import / merge existing shell history
 # ---------------------------------------------------------------------------
-# Command text comes from zsh's $history association, which is already
-# un-metafied (multibyte text and embedded newlines are exact). Timestamps
-# are read from $HISTFILE's extended-history headers (': <ts>:<dur>;') and
-# paired with events in order; without EXTENDED_HISTORY, entries fall back
-# to the current time. Amount imported is bounded by $HISTSIZE.
+#   shhist-import [-n] [file ...]
+#
+#   no file   the running zsh session's history, plus ~/.bash_history and the
+#             fish history when they exist
+#   file      format is auto-detected: zsh extended history, fish history,
+#             bash history (optional "#<epoch>" lines) or one command per line
+#   -n        dry run: report what would be added, change nothing
+#
+# This MERGES: rows already in the database are never duplicated, so it is
+# safe to run any number of times and on a database that already has data.
+#   - entries with a timestamp are matched on (command, timestamp);
+#   - entries without one (plain bash history) are matched on the command
+#     alone, count-aware: a command that occurs 500 times in the file while
+#     the database already holds 3 of it gets 497 new rows. Their timestamps
+#     are unknown, so they are spaced one second apart ending at the file's
+#     mtime to keep the file's order.
+# The running zsh session is read from $history (already un-metafied, so
+# multibyte text and embedded newlines are exact) and is bounded by $HISTSIZE.
+
+# $1 = file -> REPLY = zsh | fish | bash (first non-blank line decides)
+_shhist_import_detect() {
+  local line
+  REPLY=bash
+  while IFS= read -r line; do
+    [[ -z "${line//[[:space:]]/}" ]] && continue
+    if   [[ "$line" =~ '^: [0-9]+:[0-9]+;' ]]; then REPLY=zsh
+    elif [[ "$line" == '- cmd: '* ]];          then REPLY=fish
+    fi
+    return 0
+  done < "$1"
+}
+
+# $1 = format, $2 = file. Appends to the caller's cmds / tss arrays
+# (ts 0 = unknown).
+_shhist_import_parse() {
+  local fmt="$1" file="$2" line cur="" ts=0 have=0 pending=0
+  local nl=$'\n' bs_mark=$'\001'
+  case "$fmt" in
+    zsh)
+      # ": <ts>:<dur>;cmd"; a multi-line command continues on the following
+      # lines, each earlier line ending in a backslash.
+      while IFS= read -r line; do
+        if [[ "$line" =~ '^: ([0-9]+):[0-9]+;(.*)$' ]]; then
+          (( have )) && { cmds+=("$cur"); tss+=("$ts") }
+          ts="${match[1]}"; cur="${match[2]}"; have=1
+        elif (( have )); then
+          cur="${cur%\\}${nl}${line}"
+        fi
+      done < "$file"
+      (( have )) && { cmds+=("$cur"); tss+=("$ts") } ;;
+    fish)
+      # "- cmd: <text>" followed by "  when: <ts>"; fish escapes \ and newline.
+      while IFS= read -r line; do
+        if [[ "$line" == '- cmd: '* ]]; then
+          (( have )) && { cmds+=("$cur"); tss+=("$ts") }
+          cur="${line#- cmd: }"
+          cur="${cur//\\\\/$bs_mark}"; cur="${cur//\\n/$nl}"; cur="${cur//$bs_mark/\\}"
+          ts=0; have=1
+        elif [[ "$line" == '  when: '* ]]; then
+          ts="${line#  when: }"
+        fi
+      done < "$file"
+      (( have )) && { cmds+=("$cur"); tss+=("$ts") } ;;
+    *)
+      # bash: an optional "#<epoch>" line precedes each command.
+      while IFS= read -r line; do
+        if [[ "$line" =~ '^#[0-9]{9,}$' ]]; then
+          pending="${line#\#}"
+        elif [[ -n "${line//[[:space:]]/}" ]]; then
+          cmds+=("$line"); tss+=("$pending"); pending=0
+        fi
+      done < "$file" ;;
+  esac
+}
+
+# Merge the caller's cmds / tss arrays into the database.
+# $1 = label, $2 = mtime used to place entries without a timestamp,
+# $3 = 1 for a dry run. Prints one summary line.
+_shhist_import_merge() {
+  local label="$1" mtime="$2" dry="$3"
+  local -a keep_c keep_t keep_k
+  local i unknown=0 j=0 c t q="'"
+
+  # Drop blank commands; count entries whose timestamp is unknown.
+  for (( i = 1; i <= ${#cmds}; i++ )); do
+    [[ -z "${cmds[i]//[[:space:]]/}" ]] && continue
+    keep_c+=("${cmds[i]}"); keep_t+=("${tss[i]}")
+    [[ "${tss[i]}" == 0 ]] && (( unknown++ ))
+  done
+  if (( ! ${#keep_c} )); then print "shhist-import: $label: nothing to import"; return 0; fi
+
+  # The SQL below numbers the repeats of each command (per timestamp when it
+  # is known) and inserts only the repeats beyond what the database holds.
+  # No comments inside the $(...): an interactive zsh would not treat them
+  # as comments.
+  local out
+  out="$({
+    print "BEGIN; CREATE TEMP TABLE imp(cmd TEXT NOT NULL, ts INTEGER NOT NULL, known INTEGER NOT NULL);"
+    for (( i = 1; i <= ${#keep_c}; i++ )); do
+      c="${keep_c[i]//$q/$q$q}"; t="${keep_t[i]}"
+      if [[ "$t" == 0 ]]; then
+        (( j++ )); print -r -- "INSERT INTO imp VALUES('$c', $(( mtime - unknown + j )), 0);"
+      else
+        print -r -- "INSERT INTO imp VALUES('$c', $t, 1);"
+      fi
+    done
+    print "INSERT INTO commands(cmd, dir, ts)
+      SELECT cmd, NULL, ts FROM (
+        SELECT cmd, ts, known,
+               ROW_NUMBER() OVER (PARTITION BY cmd, CASE WHEN known THEN ts END ORDER BY rowid) AS rn
+        FROM imp) i
+      WHERE rn > CASE WHEN known
+          THEN (SELECT count(*) FROM commands c WHERE c.cmd = i.cmd AND c.ts = i.ts)
+          ELSE (SELECT count(*) FROM commands c WHERE c.cmd = i.cmd) END;"
+    print "SELECT changes();"
+    (( dry )) && print "ROLLBACK;" || print "COMMIT;"
+  } | "$SHHIST_SQLITE" -batch -noheader -cmd '.timeout 300' "$SHHIST_DB")" || {
+    print -u2 "shhist-import: $label: database error"; return 1
+  }
+  local added="${out##*$'\n'}"
+  (( dry )) && print "shhist-import: $label: ${#keep_c} entries, ${added:-0} would be added" \
+            || print "shhist-import: $label: ${#keep_c} entries, ${added:-0} new"
+}
+
 shhist-import() {
   emulate -L zsh
   zmodload -F zsh/parameter p:history 2>/dev/null
+  zmodload -F zsh/stat b:zstat 2>/dev/null
 
-  local count
-  count="$(_shhist_sql 'SELECT count(*) FROM commands;')"
-  if (( count > 0 )) && [[ "$1" != "-f" ]]; then
-    print -u2 "shhist-import: database already has $count commands; use 'shhist-import -f' to import anyway"
-    return 1
-  fi
-
-  # Timestamps in file order (digits are ASCII, never metafied).
-  local -a tss
-  local line
-  if [[ -r "${HISTFILE:-}" ]]; then
-    while IFS= read -r line; do
-      [[ "$line" =~ '^: ([0-9]+):[0-9]+;' ]] && tss+=("${match[1]}")
-    done < "$HISTFILE"
-  fi
-
-  # Loaded events, oldest first. Align with the LAST N timestamps,
-  # since zsh loads only the most recent $HISTSIZE entries.
-  # Quirk: ${(k)history} does not enumerate the newest event (the current
-  # ring slot), but direct subscripting reaches it -- append it manually.
-  local -a keys
-  keys=(${(kno)history})
-  if [[ -n "${history[$HISTCMD]:-}" ]] && (( ${keys[-1]:-0} != HISTCMD )); then
-    keys+=($HISTCMD)
-  fi
-  local offset=$(( ${#tss} - ${#keys} ))
-  (( offset < 0 )) && offset=0
-
-  local i=0 n=0 k ts cmd sql="BEGIN;"
-  for k in "${keys[@]}"; do
-    (( i++ ))
-    ts="${tss[offset + i]:-$(date +%s)}"
-    cmd="${history[$k]}"
-    [[ -z "${cmd//[[:space:]]/}" ]] && continue
-    sql+="INSERT INTO commands(cmd, dir, ts) VALUES('$(_shhist_q "$cmd")', NULL, $ts);"$'\n'
-    (( n++ ))
+  local dry=0
+  # -f is accepted and ignored: it was the old "import anyway" flag, and
+  # importing into a non-empty database is now the normal merge.
+  while [[ "$1" == -[nf] ]]; do
+    [[ "$1" == -n ]] && dry=1
+    shift
   done
-  sql+="COMMIT;"
 
-  # Feed via stdin: the script can exceed the argv size limit.
-  print -r -- "$sql" \
-    | "$SHHIST_SQLITE" -batch -noheader -cmd '.timeout 300' "$SHHIST_DB" >/dev/null \
-    && print "shhist-import: imported $n commands"
+  # mtime of $1, falling back to now.
+  _shhist_import_mtime() {
+    local -a st
+    zstat -A st +mtime -- "$1" 2>/dev/null && REPLY="${st[1]}" || REPLY="$(date +%s)"
+  }
+
+  local -a cmds tss files
+  local f fmt k i
+
+  if (( $# )); then
+    files=("$@")
+  else
+    # The running zsh session first (exact text), then other shells' files.
+    local -a tss_file keys
+    cmds=(); tss=()
+    if [[ -r "${HISTFILE:-}" ]]; then
+      local line
+      while IFS= read -r line; do
+        [[ "$line" =~ '^: ([0-9]+):[0-9]+;' ]] && tss_file+=("${match[1]}")
+      done < "$HISTFILE"
+    fi
+    # Loaded events, oldest first. Align with the LAST N timestamps, since
+    # zsh loads only the most recent $HISTSIZE entries. Quirk: ${(k)history}
+    # skips the newest event (the current ring slot), but direct subscripting
+    # reaches it -- append it manually.
+    keys=(${(kno)history})
+    if [[ -n "${history[$HISTCMD]:-}" ]] && (( ${keys[-1]:-0} != HISTCMD )); then
+      keys+=($HISTCMD)
+    fi
+    local offset=$(( ${#tss_file} - ${#keys} ))
+    (( offset < 0 )) && offset=0
+    i=0
+    for k in "${keys[@]}"; do
+      (( i++ ))
+      cmds+=("${history[$k]}"); tss+=("${tss_file[offset + i]:-0}")
+    done
+    _shhist_import_mtime "${HISTFILE:-/}"
+    _shhist_import_merge "zsh session" "$REPLY" $dry
+
+    for f in "$HOME/.bash_history" "${XDG_DATA_HOME:-$HOME/.local/share}/fish/fish_history"; do
+      [[ -s "$f" && -r "$f" ]] && files+=("$f")
+    done
+  fi
+
+  for f in "${files[@]}"; do
+    if [[ ! -r "$f" || -d "$f" ]]; then
+      print -u2 "shhist-import: cannot read $f"; continue
+    fi
+    cmds=(); tss=()
+    _shhist_import_detect "$f"; fmt="$REPLY"
+    if [[ "$fmt" == zsh ]] && LC_ALL=C command grep -q -- $'\x83' "$f" 2>/dev/null; then
+      print -u2 "shhist-import: $f has bytes zsh stored escaped; non-ASCII commands may import garbled"
+    fi
+    _shhist_import_parse "$fmt" "$f"
+    _shhist_import_mtime "$f"
+    _shhist_import_merge "${f:t} ($fmt)" "$REPLY" $dry
+  done
+  unfunction _shhist_import_mtime 2>/dev/null
+  return 0
 }
