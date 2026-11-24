@@ -40,9 +40,13 @@ if [[ -z "$sqlite_bin" ]]; then
     # sqlite3 is installed, but built without SQLITE_ENABLE_MATH_FUNCTIONS
     # (or older than 3.35), so pow() is missing.
     warn "found sqlite3 but it has no math functions (pow): ${(j:, :)found_no_math}"
-    die "need sqlite >= 3.35 built with math functions; set SHHIST_SQLITE=/path/to/sqlite3 to use a different build"
+    warn "need sqlite >= 3.35 built with math functions."
+    warn "build one from source:  $INSTALL_DIR/build-sqlite.sh"
+    die  "or set SHHIST_SQLITE=/path/to/sqlite3 to use a different build"
   fi
-  die "sqlite3 not found in PATH -- install it (brew install sqlite / dnf install sqlite)"
+  warn "sqlite3 not found in PATH."
+  warn "build one from source:  $INSTALL_DIR/build-sqlite.sh"
+  die  "or install it with your package manager (brew install sqlite)"
 fi
 ok "sqlite3 with math functions: $sqlite_bin"
 
@@ -55,6 +59,8 @@ else
   mkdir -p "$INSTALL_DIR"
   cp "$REPO_DIR/core.zsh" "$REPO_DIR/widgets.zsh" "$REPO_DIR/suggest.zsh" "$REPO_DIR/match.sh" "$REPO_DIR/rows.sh" "$INSTALL_DIR/"
   ok "installed core.zsh, widgets.zsh, suggest.zsh, match.sh, rows.sh -> $INSTALL_DIR"
+  # Optional helper that builds a sqlite3 with math functions from source.
+  [[ -f "$REPO_DIR/build-sqlite.sh" ]] && cp "$REPO_DIR/build-sqlite.sh" "$INSTALL_DIR/"
 
   # config.zsh holds user edits: install once, never overwrite.
   if [[ -f "$INSTALL_DIR/config.zsh" ]]; then
