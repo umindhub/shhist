@@ -22,15 +22,28 @@ ok "fzf $(fzf --version | cut -d' ' -f1)"
 # Need a sqlite3 built with math functions (pow) for the frecency queries.
 # Same candidate order as core.zsh.
 sqlite_bin=""
-for cand in /opt/homebrew/opt/sqlite/bin/sqlite3 /usr/local/opt/sqlite/bin/sqlite3 sqlite3; do
+found_no_math=()   # binaries that exist but lack pow(), kept for the error message
+sqlite_cands=()
+[[ -n "$SHHIST_SQLITE" ]] && sqlite_cands+=("$SHHIST_SQLITE")   # user override first
+sqlite_cands+=(/opt/homebrew/opt/sqlite/bin/sqlite3 /usr/local/opt/sqlite/bin/sqlite3 sqlite3)
+for cand in "${sqlite_cands[@]}"; do
   [[ -x "$cand" ]] || cand="$(command -v "$cand" 2>/dev/null)" || continue
   [[ -x "$cand" ]] || continue
   if "$cand" :memory: 'SELECT pow(2,10);' >/dev/null 2>&1; then
     sqlite_bin="$cand"
     break
   fi
+  found_no_math+=("$cand ($("$cand" --version 2>/dev/null | cut -d' ' -f1))")
 done
-[[ -n "$sqlite_bin" ]] || die "no sqlite3 with math functions found -- brew install sqlite"
+if [[ -z "$sqlite_bin" ]]; then
+  if (( ${#found_no_math} )); then
+    # sqlite3 is installed, but built without SQLITE_ENABLE_MATH_FUNCTIONS
+    # (or older than 3.35), so pow() is missing.
+    warn "found sqlite3 but it has no math functions (pow): ${(j:, :)found_no_math}"
+    die "need sqlite >= 3.35 built with math functions; set SHHIST_SQLITE=/path/to/sqlite3 to use a different build"
+  fi
+  die "sqlite3 not found in PATH -- install it (brew install sqlite / dnf install sqlite)"
+fi
 ok "sqlite3 with math functions: $sqlite_bin"
 
 # --- 2. Install files -------------------------------------------------------

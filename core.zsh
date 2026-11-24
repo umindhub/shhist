@@ -24,7 +24,7 @@ _shhist_resolve_sqlite() {
     export SHHIST_SQLITE
     return 0
   done
-  print -u2 "shhist: no sqlite3 with math functions found (brew install sqlite)"
+  print -u2 "shhist: no sqlite3 with math functions (pow) found -- need sqlite >= 3.35 with math enabled; set SHHIST_SQLITE to override"
   return 1
 }
 
